@@ -1,0 +1,128 @@
+import { useMemo, useState, type FormEvent } from 'react'
+import type { EChartsOption } from 'echarts'
+import { api, errorMessage } from '../api'
+import { Chart } from '../components/Chart'
+import { Button, Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
+import type { KlineBar, StockAnalysis as StockAnalysisData } from '../types'
+
+const ma = (bars: KlineBar[], days: number) =>
+  bars.map((bar, index) => {
+    const explicit = bar[`ma${days}` as keyof KlineBar]
+    if (typeof explicit === 'number') return explicit
+    if (index < days - 1) return null
+    return Number((bars.slice(index - days + 1, index + 1).reduce((sum, item) => sum + item.close, 0) / days).toFixed(2))
+  })
+
+export function StockAnalysis() {
+  const [code, setCode] = useState('')
+  const [data, setData] = useState<StockAnalysisData>()
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    const normalized = code.trim().toUpperCase()
+    if (!/^(?:\d{6}|(?:SH|SZ)\d{6})$/.test(normalized)) {
+      setError('请输入 6 位股票代码，例如 600519')
+      return
+    }
+    setLoading(true)
+    setError('')
+    try { setData(await api.stock(normalized.replace(/^(SH|SZ)/, ''))) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
+  }
+
+  const chartOption = useMemo<EChartsOption>(() => {
+    if (!data?.klines?.length) return {}
+    const bars = data.klines
+    const axisCommon = {
+      axisLine: { lineStyle: { color: '#4a463c' } },
+      axisLabel: { color: '#8d887c', fontSize: 10 },
+      splitLine: { lineStyle: { color: 'rgba(178,151,91,.1)' } },
+    }
+    return {
+      animation: true,
+      backgroundColor: 'transparent',
+      legend: { top: 2, right: 8, textStyle: { color: '#aaa396' }, data: ['MA5', 'MA10', 'MA20', 'MA60'] },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'cross', lineStyle: { color: '#b2975b' } }, backgroundColor: '#11130f', borderColor: '#665b42', textStyle: { color: '#eee7d6' } },
+      axisPointer: { link: [{ xAxisIndex: 'all' }], label: { backgroundColor: '#7d6841' } },
+      grid: [{ left: 54, right: 18, top: 38, height: '58%' }, { left: 54, right: 18, top: '75%', height: '14%' }],
+      xAxis: [
+        { ...axisCommon, type: 'category', data: bars.map((bar) => bar.date), boundaryGap: true, axisLabel: { ...axisCommon.axisLabel, show: false } },
+        { ...axisCommon, type: 'category', gridIndex: 1, data: bars.map((bar) => bar.date), boundaryGap: true },
+      ],
+      yAxis: [
+        { ...axisCommon, scale: true, splitNumber: 4 },
+        { ...axisCommon, scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { ...axisCommon.axisLabel, formatter: (value: number) => `${Math.round(value / 10000)}万` } },
+      ],
+      dataZoom: [
+        { type: 'inside', xAxisIndex: [0, 1], start: Math.max(0, 100 - 6000 / bars.length), end: 100 },
+        { type: 'slider', xAxisIndex: [0, 1], bottom: 2, height: 18, borderColor: '#3c392f', fillerColor: 'rgba(178,151,91,.2)', handleStyle: { color: '#b2975b' }, textStyle: { color: '#777268' } },
+      ],
+      series: [
+        {
+          name: 'K线', type: 'candlestick', data: bars.map((bar) => [bar.open, bar.close, bar.low, bar.high]),
+          itemStyle: { color: '#b93a32', color0: '#3d8b6d', borderColor: '#d35449', borderColor0: '#57a987' },
+        },
+        ...[
+          ['MA5', 5, '#d9b85f'], ['MA10', 10, '#b98dc0'], ['MA20', 20, '#5da5b8'], ['MA60', 60, '#eee7d6'],
+        ].map(([name, days, color]) => ({
+          name, type: 'line', data: ma(bars, Number(days)), smooth: true, symbol: 'none',
+          lineStyle: { width: 1.2, color }, emphasis: { focus: 'series' },
+        })),
+        {
+          name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
+          data: bars.map((bar) => ({ value: bar.volume, itemStyle: { color: bar.close >= bar.open ? 'rgba(185,58,50,.65)' : 'rgba(61,139,109,.65)' } })),
+        },
+      ],
+    } as EChartsOption
+  }, [data])
+
+  return (
+    <div className="page">
+      <PageHeader eyebrow="STOCK DIAGNOSIS · 个股诊断" title="不预测，只确认" description="输入代码，观察价格、均线与成交量是否说着同一种语言。" />
+      <form className="stock-search" onSubmit={submit}>
+        <label htmlFor="stock-code">股票代码</label>
+        <input id="stock-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="例如 600519" inputMode="numeric" maxLength={8} />
+        <Button type="submit" disabled={loading}>{loading ? '诊断中…' : '开始诊断'}</Button>
+      </form>
+      {loading ? <StatusView state="loading" /> : error ? <StatusView state="error" message={error} /> : !data ? (
+        <div className="analysis-placeholder"><span>析</span><p>键入股票代码<br /><small>让数据先开口</small></p></div>
+      ) : (
+        <>
+          {data.source === 'sample' && (
+            <div className="source-notice" role="status">
+              <strong>演示行情</strong>
+              <span>akshare 上游暂不可用，当前 K 线为模拟数据，不能作为交易依据。</span>
+            </div>
+          )}
+          <section className="stock-ticker">
+            <div><p>{data.code}</p><h2>{data.name}</h2></div>
+            <Metric label="现价" value={Number(data.price).toFixed(2)} />
+            <Metric label="涨跌幅" value={percent(data.change)} tone={data.change >= 0 ? 'gain' : 'loss'} />
+            <Metric label="趋势判定" value={data.trend || '待确认'} note={data.score != null ? `强度 ${data.score}` : undefined} />
+          </section>
+          <Panel title="量价结构" eyebrow="PRICE · VOLUME" className="chart-panel">
+            {data.klines?.length ? <Chart option={chartOption} ariaLabel={`${data.name} K线、均线和成交量图`} className="stock-chart" /> : <StatusView state="empty" message="暂无K线数据" />}
+          </Panel>
+          <div className="analysis-grid">
+            <Panel title="趋势结论" eyebrow="VERDICT">
+              <p className="verdict">{data.summary || data.trend || '趋势信号尚不充分，继续观察。'}</p>
+              {(data.support || data.resistance) && (
+                <p className="price-levels">
+                  近20日支撑 <b>{Number(data.support || 0).toFixed(2)}</b>
+                  <span>·</span>
+                  压力 <b>{Number(data.resistance || 0).toFixed(2)}</b>
+                </p>
+              )}
+            </Panel>
+            <Panel title="入场检查" eyebrow="DISCIPLINE CHECK">
+              {data.checks?.length ? <ul className="check-list">{data.checks.map((item, i) => (
+                <li key={`${item.label}-${i}`} className={item.passed ? 'passed' : 'failed'}><span>{item.passed ? '✓' : '×'}</span><div><b>{item.label}</b>{item.detail && <small>{item.detail}</small>}</div></li>
+              ))}</ul> : <StatusView state="empty" message="暂无检查项" />}
+            </Panel>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}

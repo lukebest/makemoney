@@ -1,1 +1,12 @@
 ppt_images
+.venv/
+__pycache__/
+*.py[cod]
+*.db
+.pytest_cache/
+.coverage
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+artifacts/
+.DS_Store
