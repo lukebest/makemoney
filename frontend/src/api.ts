@@ -130,6 +130,9 @@ function normalizeStock(value: unknown): StockAnalysis {
     fallbackReason: stringFrom(raw.fallback_reason),
     support: numberFrom(raw.support),
     resistance: numberFrom(raw.resistance),
+    market: stringFrom(raw.market, 'A') as StockAnalysis['market'],
+    currency: stringFrom(raw.currency, 'CNY') as StockAnalysis['currency'],
+    cnyRate: numberFrom(raw.cny_rate, 1),
   }
 }
 
@@ -177,6 +180,12 @@ function normalizePosition(value: unknown): Position {
     createdAt: stringFrom(raw.created_at ?? raw.createdAt),
     stopTriggered: Boolean(raw.stop_triggered),
     change: numberFrom(raw.change_pct),
+    market: stringFrom(raw.market, 'A') as Position['market'],
+    currency: stringFrom(raw.currency, 'CNY') as Position['currency'],
+    fxRate: numberFrom(raw.fx_rate, 1),
+    marketValue: raw.market_value == null ? undefined : numberFrom(raw.market_value),
+    costValue: numberFrom(raw.avg_price ?? raw.costPrice) * numberFrom(raw.quantity) * numberFrom(raw.fx_rate, 1),
+    unrealizedPnl: raw.unrealized_pnl == null ? undefined : numberFrom(raw.unrealized_pnl),
   }
 }
 
@@ -195,6 +204,9 @@ function normalizeTrade(value: unknown): Trade {
     reason: note || logic,
     stopPrice: numberFrom(raw.stop_loss ?? raw.stopPrice) || undefined,
     questions: logic ? [logic, note, '已确认资金与上涨空间'] : undefined,
+    market: stringFrom(raw.market, 'A') as Trade['market'],
+    currency: stringFrom(raw.currency, 'CNY') as Trade['currency'],
+    fxRate: numberFrom(raw.fx_rate, 1),
   }
 }
 

@@ -5,6 +5,8 @@ def test_normalize_and_sina_symbol():
     assert normalize_code("sh600519") == "600519"
     assert normalize_code("sz000001") == "000001"
     assert normalize_code("bj920000") == "920000"
+    assert normalize_code("00700") == "00700"
+    assert normalize_code("hk700") == "00700"
     assert to_sina_symbol("600519") == "sh600519"
     assert to_sina_symbol("000001") == "sz000001"
     assert to_sina_symbol("300750") == "sz300750"
@@ -33,6 +35,30 @@ def test_parse_spot_rows_accepts_prefixed_codes():
     assert rows[0]["code"] == "600519"
     assert rows[0]["price"] == 1500.0
     assert rows[0]["source"] == "akshare"
+
+
+def test_parse_hong_kong_spot_rows():
+    rows = MarketService._parse_spot_rows(
+        [
+            {
+                "代码": "00700",
+                "中文名称": "腾讯控股",
+                "最新价": 472.4,
+                "涨跌额": 16.2,
+                "涨跌幅": 3.55,
+                "昨收": 456.2,
+                "今开": 467.6,
+                "最高": 475.8,
+                "最低": 455.4,
+                "成交量": 18_000_000,
+                "成交额": 8_600_000_000,
+            }
+        ]
+    )
+    assert rows[0]["code"] == "00700"
+    assert rows[0]["name"] == "腾讯控股"
+    assert rows[0]["market"] == "HK"
+    assert rows[0]["currency"] == "HKD"
 
 
 def test_normalize_klines_fills_change_and_turnover():

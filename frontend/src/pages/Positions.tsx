@@ -28,12 +28,12 @@ export function Positions() {
   }, [])
   useEffect(() => { void load() }, [load])
 
-  const marketValue = positions.reduce((sum, position) => sum + position.quantity * (position.currentPrice || position.costPrice), 0)
-  const cost = positions.reduce((sum, position) => sum + position.quantity * position.costPrice, 0)
+  const marketValue = positions.reduce((sum, position) => sum + (position.marketValue ?? position.quantity * (position.currentPrice || position.costPrice) * (position.fxRate || 1)), 0)
+  const cost = positions.reduce((sum, position) => sum + (position.costValue ?? position.quantity * position.costPrice * (position.fxRate || 1)), 0)
   const pnl = marketValue - cost
   const stopAlerts = positions.filter((position) => position.stopPrice > 0 && position.currentPrice <= position.stopPrice)
-  const bottomValue = positions.filter((p) => p.tier === 1).reduce((sum, p) => sum + p.quantity * (p.currentPrice || p.costPrice), 0)
-  const activeValue = positions.filter((p) => p.tier !== 1).reduce((sum, p) => sum + p.quantity * (p.currentPrice || p.costPrice), 0)
+  const bottomValue = positions.filter((p) => p.tier === 1).reduce((sum, p) => sum + (p.marketValue ?? p.quantity * (p.currentPrice || p.costPrice) * (p.fxRate || 1)), 0)
+  const activeValue = positions.filter((p) => p.tier !== 1).reduce((sum, p) => sum + (p.marketValue ?? p.quantity * (p.currentPrice || p.costPrice) * (p.fxRate || 1)), 0)
   const allocationWarnings = settings.totalCapital > 0
     ? [
       bottomValue > settings.totalCapital * .3 ? '底仓超过30%' : '',
@@ -121,14 +121,14 @@ export function Positions() {
             {!positions.length ? <StatusView state="empty" message="新增第一笔持仓，开始记录风险" /> : <div className="table-wrap"><table>
               <thead><tr><th>标的</th><th>层级</th><th>数量</th><th>成本 / 现价</th><th>市值</th><th>盈亏</th><th>止损价</th><th><span className="sr-only">操作</span></th></tr></thead>
               <tbody>{positions.map((p) => {
-                const itemPnl = (p.currentPrice - p.costPrice) * p.quantity
+                const itemPnl = p.unrealizedPnl ?? (p.currentPrice - p.costPrice) * p.quantity * (p.fxRate || 1)
                 const warning = p.stopPrice > 0 && p.currentPrice <= p.stopPrice
                 return <tr key={p.id} className={warning ? 'warning-row' : ''}>
-                  <td><b>{p.name || '未命名'}</b><small>{p.code}</small></td>
+                  <td><b>{p.name || '未命名'}</b><small>{p.code}{p.market === 'HK' ? ' · 港股' : ''}</small></td>
                   <td><span className={`tier tier-${p.tier}`}>{p.tier === 1 ? '底仓' : '机动'}</span></td>
                   <td>{p.quantity.toLocaleString()}</td>
-                  <td>{p.costPrice.toFixed(2)} <i>/</i> {p.currentPrice.toFixed(2)}</td>
-                  <td>{money(p.quantity * p.currentPrice)}</td>
+                  <td>{p.currency === 'HKD' ? 'HK$' : '¥'}{p.costPrice.toFixed(2)} <i>/</i> {p.currentPrice.toFixed(2)}</td>
+                  <td>{money(p.marketValue ?? p.quantity * p.currentPrice * (p.fxRate || 1))}</td>
                   <td className={itemPnl >= 0 ? 'gain' : 'loss'}>{money(itemPnl)}</td>
                   <td className={warning ? 'gain' : ''}>{p.stopPrice.toFixed(2)}{warning && <small> 已触发</small>}</td>
                   <td className="row-actions"><Button tone="ghost" onClick={() => beginEdit(p)}>编辑</Button><Button tone="danger" onClick={() => void remove(p)}>删除</Button></td>
@@ -143,7 +143,7 @@ export function Positions() {
         <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="position-dialog-title">
           <div className="dialog-head"><div><span>POSITION LEDGER</span><h2 id="position-dialog-title">{editingId != null ? '编辑持仓' : '新增持仓'}</h2></div><button onClick={() => setOpen(false)} aria-label="关闭">×</button></div>
           <form className="form-grid" onSubmit={savePosition}>
-            <label>股票代码<input required value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="600519" /></label>
+            <label>股票代码<input required value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="A股 600519 / 港股通 00700" /></label>
             <label>股票名称<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="贵州茅台" /></label>
             <label>持有数量<input required type="number" min="1" value={form.quantity || ''} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} /></label>
             <label>持仓层级<select value={form.tier} onChange={(e) => setForm({ ...form, tier: Number(e.target.value) as 1 | 2 })}><option value="1">底仓 · 目标30%</option><option value="2">机动仓 · 目标30%</option></select></label>

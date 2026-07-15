@@ -34,6 +34,9 @@ class DummyMarket:
     def stock_daily(self, code, days):
         return {"code": code, "klines": [], "source": "test", "days": days}
 
+    def cny_rate(self, code):
+        return 0.87 if len(code) == 5 else 1.0
+
     def preferred_stocks(self, limit, candidates):
         return {
             "items": [
@@ -75,10 +78,34 @@ def test_health_settings_and_cors(tmp_path):
         )
         assert preflight.headers["access-control-allow-origin"] == "http://localhost:5173"
         assert client.get("/api/stocks/600519").status_code == 200
+        assert client.get("/api/stocks/00700").json()["code"] == "00700"
         preferred = client.get("/api/market/preferred?limit=1&candidates=3")
         assert preferred.status_code == 200
         assert preferred.json()["items"][0]["score"] == 75
         assert preferred.json()["analyzed_count"] == 3
+
+
+def test_hong_kong_connect_buy_allows_non_a_share_lot(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post(
+            "/api/trades",
+            json={
+                "code": "00700",
+                "name": "腾讯控股",
+                "side": "buy",
+                "quantity": 10,
+                "price": 400,
+                "logic": "港股通趋势验证",
+                "funds_confirmed": True,
+                "space_confirmed": True,
+                "stop_loss": 380,
+            },
+        )
+        assert response.status_code == 201
+        trade = response.json()["trade"]
+        assert trade["code"] == "00700"
+        assert trade["currency"] == "HKD"
+        assert trade["fx_rate"] == 0.87
 
 
 def test_buy_requires_discipline_and_updates_review(tmp_path):

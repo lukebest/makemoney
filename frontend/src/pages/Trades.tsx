@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, errorMessage } from '../api'
-import { Button, PageHeader, Panel, StatusView, money } from '../components/ui'
+import { Button, PageHeader, Panel, StatusView } from '../components/ui'
 import type { Trade, TradeInput, TradeSide } from '../types'
 
 const nowLocal = () => {
@@ -13,6 +13,13 @@ const initialTrade = (side: TradeSide): TradeInput => ({
   questions: side === 'buy' ? ['', '', ''] : undefined,
 })
 
+const nativeMoney = (value: number, currency: 'CNY' | 'HKD' = 'CNY') =>
+  new Intl.NumberFormat('zh-CN', {
+    style: 'currency',
+    currency,
+    maximumFractionDigits: 2,
+  }).format(value || 0)
+
 export function Trades() {
   const [side, setSide] = useState<TradeSide>('buy')
   const [form, setForm] = useState<TradeInput>(() => initialTrade('buy'))
@@ -21,6 +28,7 @@ export function Trades() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const isHongKong = /^(?:HK)?\d{5}$/i.test(form.code.trim())
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -64,10 +72,10 @@ export function Trades() {
           </div>
           <form className="trade-form" onSubmit={submit}>
             <div className="form-grid">
-              <label>股票代码<input required value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="000001" /></label>
+              <label>股票代码<input required value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="A股 000001 / 港股通 00700" /></label>
               <label>股票名称<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="可选" /></label>
               <label>成交价格<input required type="number" min="0.01" step="0.01" value={form.price || ''} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} /></label>
-              <label>成交数量<input required type="number" min={side === 'buy' ? 100 : 1} step={side === 'buy' ? 100 : 1} value={form.quantity || ''} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} /></label>
+              <label>成交数量<input required type="number" min={side === 'buy' && !isHongKong ? 100 : 1} step={side === 'buy' && !isHongKong ? 100 : 1} value={form.quantity || ''} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} /><small>{isHongKong ? '港股每手股数因股票而异，请按实际数量填写' : 'A股买入数量须为100股的整数倍'}</small></label>
               <label className="full">成交时间<input required type="datetime-local" value={form.tradedAt} onChange={(e) => setForm({ ...form, tradedAt: e.target.value })} /></label>
             </div>
 
@@ -98,8 +106,8 @@ export function Trades() {
             <article key={trade.id}>
               <time>{new Date(trade.tradedAt).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })}<small>{new Date(trade.tradedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</small></time>
               <span className={`side-badge ${trade.side}`}>{trade.side === 'buy' ? '买' : '卖'}</span>
-              <div className="trade-symbol"><b>{trade.name || trade.code}</b><small>{trade.code}</small></div>
-              <div><span>{trade.quantity.toLocaleString()} 股 × {trade.price.toFixed(2)}</span><strong>{money(trade.quantity * trade.price)}</strong></div>
+              <div className="trade-symbol"><b>{trade.name || trade.code}</b><small>{trade.code}{trade.market === 'HK' ? ' · 港股' : ''}</small></div>
+              <div><span>{trade.quantity.toLocaleString()} 股 × {trade.price.toFixed(2)}</span><strong>{nativeMoney(trade.quantity * trade.price, trade.currency)}</strong></div>
               <p>{trade.reason || trade.questions?.[0] || '—'}</p>
             </article>
           ))}

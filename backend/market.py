@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 import re
 import threading
@@ -59,8 +60,13 @@ class MarketService:
 
     def quotes(self, codes: list[str]) -> dict[str, dict[str, Any]]:
         normalized = [normalize_code(code) for code in codes]
-        spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
-        by_code = {item["code"]: item for item in spot["items"]}
+        by_code: dict[str, dict[str, Any]] = {}
+        if any(is_a_share_code(code) for code in normalized):
+            spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
+            by_code.update({item["code"]: item for item in spot["items"]})
+        if any(is_hk_code(code) for code in normalized):
+            hk_spot = self.cache.get_or_load("market:hk:spot", 45, self._load_hk_spot)
+            by_code.update({item["code"]: item for item in hk_spot["items"]})
         result: dict[str, dict[str, Any]] = {}
         for code in normalized:
             item = by_code.get(code)
@@ -71,13 +77,20 @@ class MarketService:
 
     def stock_daily(self, code: str, days: int = 120) -> dict[str, Any]:
         code = normalize_code(code)
-        if not re.fullmatch(r"\d{6}", code):
-            raise ValueError("stock code must contain exactly 6 digits")
+        if not (is_a_share_code(code) or is_hk_code(code)):
+            raise ValueError("stock code must contain 5 Hong Kong or 6 A-share digits")
         days = max(60, min(days, 500))
         key = f"daily:{code}:{days}"
         return self.cache.get_or_load(
             key, 900, lambda: self._load_stock_daily(code, days)
         )
+
+    def cny_rate(self, code: str) -> float:
+        if is_hk_code(normalize_code(code)):
+            return self.cache.get_or_load(
+                "fx:hkd-cny", 3600, self._load_hkd_cny_rate
+            )
+        return 1.0
 
     def preferred_stocks(
         self, limit: int = 8, candidate_count: int = 12
@@ -236,6 +249,27 @@ class MarketService:
             "fallback_reason": "; ".join(errors)[:240] or "spot providers unavailable",
         }
 
+    def _load_hk_spot(self) -> dict[str, Any]:
+        errors: list[str] = []
+        ak = _import_akshare()
+        for name in ("stock_hk_spot", "stock_hk_spot_em"):
+            try:
+                items = self._parse_spot_rows(_records(getattr(ak, name)()))
+                if items:
+                    return {
+                        "items": items,
+                        "source": "akshare",
+                        "fallback_reason": None,
+                    }
+                errors.append(f"{name}: empty")
+            except Exception as exc:
+                errors.append(f"{name}: {_safe_reason(exc)}")
+        return {
+            "items": [],
+            "source": "sample",
+            "fallback_reason": "; ".join(errors)[:240] or "HK quote providers unavailable",
+        }
+
     def _spot_from_sina(self) -> list[dict[str, Any]]:
         ak = _import_akshare()
         return self._parse_spot_rows(_records(ak.stock_zh_a_spot()))
@@ -250,12 +284,13 @@ class MarketService:
         for row in records:
             code = normalize_code(_pick(row, "代码", "code", default=""))
             price = _number(_pick(row, "最新价", "price"))
-            if not re.fullmatch(r"\d{6}", code) or price <= 0:
+            if not (is_a_share_code(code) or is_hk_code(code)) or price <= 0:
                 continue
+            hk = is_hk_code(code)
             items.append(
                 {
                     "code": code,
-                    "name": str(_pick(row, "名称", "name", default=code)),
+                    "name": str(_pick(row, "名称", "中文名称", "name", default=code)),
                     "price": price,
                     "change": _number(_pick(row, "涨跌额", "change")),
                     "change_pct": _number(_pick(row, "涨跌幅", "change_pct")),
@@ -266,6 +301,8 @@ class MarketService:
                     "volume": _number(_pick(row, "成交量", "volume")),
                     "amount": _number(_pick(row, "成交额", "amount")),
                     "source": "akshare",
+                    "market": "HK" if hk else "A",
+                    "currency": "HKD" if hk else "CNY",
                 }
             )
         return items
@@ -322,6 +359,14 @@ class MarketService:
         enriched = enrich_klines(rows)
         support, resistance = support_resistance(enriched)
         quote = self.quotes([code])[code]
+        if quote["source"] == "sample" and source == "akshare":
+            quote = {
+                **quote,
+                "price": enriched[-1]["close"],
+                "change_pct": enriched[-1]["change_pct"],
+            }
+            source = "partial"
+            fallback_reason = "live quote unavailable; using latest historical close"
         trend = trend_label(enriched)
         trend_summaries = {
             "up": "均线呈多头结构，价格处于趋势上方；顺势观察，回调时仍需验证承接。",
@@ -334,6 +379,9 @@ class MarketService:
             "name": quote["name"],
             "price": quote["price"],
             "change_pct": quote["change_pct"],
+            "market": quote.get("market", "HK" if is_hk_code(code) else "A"),
+            "currency": quote.get("currency", "HKD" if is_hk_code(code) else "CNY"),
+            "cny_rate": self.cny_rate(code),
             "klines": enriched,
             "trend": trend,
             "summary": trend_summaries[trend],
@@ -347,6 +395,17 @@ class MarketService:
 
     def _fetch_daily_rows(self, code: str, days: int) -> list[dict[str, Any]]:
         ak = _import_akshare()
+        if is_hk_code(code):
+            try:
+                rows = self._normalize_klines(
+                    _records(ak.stock_hk_daily(symbol=code, adjust="qfq"))
+                )[-days:]
+                if len(rows) >= 20:
+                    return rows
+            except Exception as exc:
+                raise RuntimeError(f"sina HK: {_safe_reason(exc)}") from exc
+            raise RuntimeError("sina HK: insufficient rows")
+
         end = date.today()
         start = end - timedelta(days=max(days * 2, 180))
         start_s = start.strftime("%Y%m%d")
@@ -385,6 +444,27 @@ class MarketService:
             errors.append(f"em: {_safe_reason(exc)}")
 
         raise RuntimeError("; ".join(errors) or "daily history unavailable")
+
+    @staticmethod
+    def _load_hkd_cny_rate() -> float:
+        fallback = float(os.getenv("HKD_CNY_RATE", "0.87"))
+        try:
+            ak = _import_akshare()
+            end = date.today()
+            start = end - timedelta(days=14)
+            frame = ak.currency_boc_sina(
+                symbol="港币",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+            )
+            records = _records(frame)
+            for row in reversed(records):
+                rate = _number(_pick(row, "中行折算价", "央行中间价"))
+                if rate > 0:
+                    return round(rate / 100, 6)
+        except Exception:
+            pass
+        return fallback
 
     @staticmethod
     def _normalize_klines(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -482,6 +562,7 @@ class MarketService:
             "300750": "宁德时代",
             "601318": "中国平安",
             "000858": "五粮液",
+            "00700": "腾讯控股",
         }
         seed = int(code) if code.isdigit() else sum(ord(char) for char in code)
         price = round(8 + (seed % 24000) / 100, 2)
@@ -501,6 +582,8 @@ class MarketService:
             "volume": float(5_000_000 + seed % 20_000_000),
             "amount": round(price * (5_000_000 + seed % 20_000_000), 2),
             "source": "sample",
+            "market": "HK" if is_hk_code(code) else "A",
+            "currency": "HKD" if is_hk_code(code) else "CNY",
         }
 
     @staticmethod
@@ -544,9 +627,24 @@ class MarketService:
 
 def normalize_code(value: Any) -> str:
     code = str(value or "").strip().lower()
-    code = re.sub(r"^(sh|sz|bj)", "", code)
+    prefix = re.match(r"^(sh|sz|bj|hk)", code)
+    code = re.sub(r"^(sh|sz|bj|hk)", "", code)
     digits = re.sub(r"\D", "", code)
-    return digits.zfill(6) if digits and len(digits) <= 6 else digits
+    if not digits:
+        return digits
+    if prefix and prefix.group(1) == "hk":
+        return digits.zfill(5)
+    if len(digits) == 5:
+        return digits
+    return digits.zfill(6) if len(digits) <= 6 else digits
+
+
+def is_hk_code(code: str) -> bool:
+    return bool(re.fullmatch(r"\d{5}", code))
+
+
+def is_a_share_code(code: str) -> bool:
+    return bool(re.fullmatch(r"\d{6}", code))
 
 
 def to_sina_symbol(code: str) -> str:

@@ -50,6 +50,9 @@ export interface StockAnalysis {
   fallbackReason?: string
   support?: number
   resistance?: number
+  market?: 'A' | 'HK'
+  currency?: 'CNY' | 'HKD'
+  cnyRate?: number
 }
 
 export interface PreferredCheck {
@@ -99,6 +102,12 @@ export interface Position {
   createdAt?: string
   stopTriggered?: boolean
   change?: number
+  market?: 'A' | 'HK'
+  currency?: 'CNY' | 'HKD'
+  fxRate?: number
+  marketValue?: number
+  costValue?: number
+  unrealizedPnl?: number
 }
 
 export interface PositionInput {
@@ -125,6 +134,9 @@ export interface Trade {
   reason?: string
   stopPrice?: number
   questions?: [string, string, string]
+  market?: 'A' | 'HK'
+  currency?: 'CNY' | 'HKD'
+  fxRate?: number
 }
 
 export interface TradeInput {

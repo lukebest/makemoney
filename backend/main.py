@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .db import Database
-from .market import MarketService, normalize_code
+from .market import MarketService, is_hk_code, normalize_code
 from .signals import review_statistics, stop_loss_status
 
 
@@ -174,8 +174,9 @@ def create_app(
     @application.get("/api/positions/status", tags=["positions"])
     def positions_status(request: Request) -> dict[str, Any]:
         db = _db(request)
+        market = _market(request)
         positions = db.list_positions()
-        quotes = _market(request).quotes([row["code"] for row in positions])
+        quotes = market.quotes([row["code"] for row in positions])
         settings = db.get_settings()
         total_capital = float(settings["total_capital"])
         items = []
@@ -185,15 +186,21 @@ def create_app(
         for row in positions:
             quote = quotes[row["code"]]
             price = float(quote["price"])
-            market_value = price * int(row["quantity"])
-            unrealized = (price - float(row["avg_price"])) * int(row["quantity"])
-            cost = float(row["avg_price"]) * int(row["quantity"])
+            fx_rate = market.cny_rate(row["code"])
+            market_value = price * int(row["quantity"]) * fx_rate
+            unrealized = (
+                (price - float(row["avg_price"])) * int(row["quantity"]) * fx_rate
+            )
+            cost = float(row["avg_price"]) * int(row["quantity"]) * fx_rate
             stop_status = stop_loss_status(price, float(row["stop_loss"]))
             stop_triggered = stop_status["triggered"]
             item = {
                 **row,
                 "live_price": price,
                 "price_source": quote["source"],
+                "market": quote.get("market", row.get("market", "A")),
+                "currency": quote.get("currency", row.get("currency", "CNY")),
+                "fx_rate": fx_rate,
                 "change_pct": quote["change_pct"],
                 "market_value": round(market_value, 2),
                 "unrealized_pnl": round(unrealized, 2),
@@ -233,11 +240,15 @@ def create_app(
         db = _db(request)
         values = _dump(payload)
         values["code"] = _valid_code(payload.code)
+        hk = is_hk_code(values["code"])
+        values["market"] = "HK" if hk else "A"
+        values["currency"] = "HKD" if hk else "CNY"
+        values["fx_rate"] = _market(request).cny_rate(values["code"])
         if payload.stop_loss >= payload.avg_price:
             raise HTTPException(status_code=422, detail="stop loss must be below cost price")
         settings = db.get_settings()
         current = db.portfolio_snapshot()
-        cost = payload.quantity * payload.avg_price
+        cost = payload.quantity * payload.avg_price * values["fx_rate"]
         if cost > current["available_funds"] + 1e-6:
             raise HTTPException(status_code=409, detail="insufficient available funds")
         if cost > float(settings["total_capital"]) * float(settings["max_position_ratio"]):
@@ -265,17 +276,24 @@ def create_app(
         quantity = payload.quantity or int(current_position["quantity"])
         avg_price = payload.avg_price or float(current_position["avg_price"])
         stop_loss = payload.stop_loss or float(current_position["stop_loss"])
+        fx_rate = _market(request).cny_rate(code)
         if stop_loss >= avg_price:
             raise HTTPException(status_code=422, detail="stop loss must be below cost price")
         settings = db.get_settings()
-        old_cost = int(current_position["quantity"]) * float(current_position["avg_price"])
-        proposed_cost = quantity * avg_price
+        old_cost = (
+            int(current_position["quantity"])
+            * float(current_position["avg_price"])
+            * float(current_position.get("fx_rate", 1.0))
+        )
+        proposed_cost = quantity * avg_price * fx_rate
         other_cost = float(db.portfolio_snapshot()["invested_cost"]) - old_cost
         if proposed_cost > float(settings["total_capital"]) * float(settings["max_position_ratio"]):
             raise HTTPException(status_code=409, detail="position exceeds single-stock limit")
         if other_cost + proposed_cost > float(settings["total_capital"]) * float(settings["max_invested_ratio"]):
             raise HTTPException(status_code=409, detail="total invested position exceeds 60% limit")
-        result = db.update_position(code, _dump(payload, exclude_unset=True))
+        updates = _dump(payload, exclude_unset=True)
+        updates["fx_rate"] = fx_rate
+        result = db.update_position(code, updates)
         if result is None:
             raise HTTPException(status_code=404, detail="position not found")
         return result
@@ -297,7 +315,11 @@ def create_app(
     )
     def create_trade(payload: TradeCreate, request: Request) -> dict[str, Any]:
         code = _valid_code(payload.code)
-        if payload.side == "buy" and payload.quantity % 100 != 0:
+        if (
+            payload.side == "buy"
+            and not is_hk_code(code)
+            and payload.quantity % 100 != 0
+        ):
             raise HTTPException(
                 status_code=422, detail="A-share buy quantity must be a multiple of 100"
             )
@@ -306,6 +328,9 @@ def create_app(
         values["code"] = code
         values["name"] = payload.name or quote["name"]
         values["price"] = payload.price or quote["price"]
+        values["market"] = quote.get("market", "HK" if is_hk_code(code) else "A")
+        values["currency"] = quote.get("currency", "HKD" if is_hk_code(code) else "CNY")
+        values["fx_rate"] = _market(request).cny_rate(code)
         try:
             trade = _db(request).execute_trade(values)
         except ValueError as exc:
@@ -372,8 +397,11 @@ def _market(request: Request) -> MarketService:
 
 def _valid_code(code: str) -> str:
     normalized = normalize_code(code)
-    if not re.fullmatch(r"\d{6}", normalized):
-        raise HTTPException(status_code=422, detail="stock code must contain exactly 6 digits")
+    if not re.fullmatch(r"(?:\d{5}|\d{6})", normalized):
+        raise HTTPException(
+            status_code=422,
+            detail="stock code must contain 5 Hong Kong or 6 A-share digits",
+        )
     return normalized
 
 

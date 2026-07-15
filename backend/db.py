@@ -64,6 +64,9 @@ class Database:
                     stop_loss REAL NOT NULL CHECK (stop_loss > 0),
                     tier INTEGER NOT NULL DEFAULT 1 CHECK (tier BETWEEN 1 AND 3),
                     thesis TEXT NOT NULL DEFAULT '',
+                    market TEXT NOT NULL DEFAULT 'A',
+                    currency TEXT NOT NULL DEFAULT 'CNY',
+                    fx_rate REAL NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -83,6 +86,9 @@ class Database:
                     realized_pnl REAL,
                     violated INTEGER NOT NULL DEFAULT 0,
                     note TEXT NOT NULL DEFAULT '',
+                    market TEXT NOT NULL DEFAULT 'A',
+                    currency TEXT NOT NULL DEFAULT 'CNY',
+                    fx_rate REAL NOT NULL DEFAULT 1,
                     traded_at TEXT NOT NULL
                 );
 
@@ -112,6 +118,28 @@ class Database:
                 connection.execute(
                     "ALTER TABLE positions ADD COLUMN tier INTEGER NOT NULL DEFAULT 1"
                 )
+            for name, definition in (
+                ("market", "TEXT NOT NULL DEFAULT 'A'"),
+                ("currency", "TEXT NOT NULL DEFAULT 'CNY'"),
+                ("fx_rate", "REAL NOT NULL DEFAULT 1"),
+            ):
+                if name not in position_columns:
+                    connection.execute(
+                        f"ALTER TABLE positions ADD COLUMN {name} {definition}"
+                    )
+            trade_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(trades)").fetchall()
+            }
+            for name, definition in (
+                ("market", "TEXT NOT NULL DEFAULT 'A'"),
+                ("currency", "TEXT NOT NULL DEFAULT 'CNY'"),
+                ("fx_rate", "REAL NOT NULL DEFAULT 1"),
+            ):
+                if name not in trade_columns:
+                    connection.execute(
+                        f"ALTER TABLE trades ADD COLUMN {name} {definition}"
+                    )
             now = utc_now()
             defaults = {
                 "total_capital": 100000.0,
@@ -171,8 +199,8 @@ class Database:
                 """
                 INSERT INTO positions(
                     code, name, quantity, avg_price, stop_loss, tier, thesis,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    market, currency, fx_rate, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     values["code"],
@@ -182,6 +210,9 @@ class Database:
                     values["stop_loss"],
                     values.get("tier", 1),
                     values.get("thesis", ""),
+                    values.get("market", "A"),
+                    values.get("currency", "CNY"),
+                    values.get("fx_rate", 1.0),
                     now,
                     now,
                 ),
@@ -189,7 +220,10 @@ class Database:
         return self.get_position(str(values["code"])) or {}
 
     def update_position(self, code: str, values: Mapping[str, Any]) -> dict[str, Any] | None:
-        allowed = {"name", "quantity", "avg_price", "stop_loss", "tier", "thesis"}
+        allowed = {
+            "name", "quantity", "avg_price", "stop_loss", "tier", "thesis",
+            "market", "currency", "fx_rate",
+        }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
             return self.get_position(code)
@@ -223,7 +257,7 @@ class Database:
         with self.connect() as connection:
             invested = float(
                 connection.execute(
-                    "SELECT COALESCE(SUM(quantity * avg_price), 0) FROM positions"
+                    "SELECT COALESCE(SUM(quantity * avg_price * fx_rate), 0) FROM positions"
                 ).fetchone()[0]
             )
             realized = float(
@@ -244,7 +278,8 @@ class Database:
         side = str(values["side"]).lower()
         quantity = int(values["quantity"])
         price = float(values["price"])
-        amount = round(quantity * price, 2)
+        fx_rate = float(values.get("fx_rate", 1.0))
+        amount = round(quantity * price * fx_rate, 2)
         now = utc_now()
         with self.transaction() as connection:
             settings_rows = connection.execute(
@@ -273,7 +308,7 @@ class Database:
                 old_quantity = int(position["quantity"]) if position else 0
                 old_cost = old_quantity * float(position["avg_price"]) if position else 0.0
                 new_quantity = old_quantity + quantity
-                avg_price = (old_cost + amount) / new_quantity
+                avg_price = (old_cost + quantity * price) / new_quantity
                 stop_loss = float(values["stop_loss"])
                 name = str(values.get("name") or (position and position["name"]) or code)
                 thesis = str(values.get("logic") or "")
@@ -281,8 +316,8 @@ class Database:
                     """
                     INSERT INTO positions(
                         code, name, quantity, avg_price, stop_loss, tier, thesis,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        market, currency, fx_rate, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(code) DO UPDATE SET
                         name = excluded.name,
                         quantity = excluded.quantity,
@@ -290,6 +325,9 @@ class Database:
                         stop_loss = excluded.stop_loss,
                         tier = excluded.tier,
                         thesis = excluded.thesis,
+                        market = excluded.market,
+                        currency = excluded.currency,
+                        fx_rate = excluded.fx_rate,
                         updated_at = excluded.updated_at
                     """,
                     (
@@ -300,6 +338,9 @@ class Database:
                         stop_loss,
                         int(values.get("tier") or (position and position.get("tier")) or 1),
                         thesis,
+                        values.get("market", position.get("market") if position else "A"),
+                        values.get("currency", position.get("currency") if position else "CNY"),
+                        fx_rate,
                         position["created_at"] if position else now,
                         now,
                     ),
@@ -309,7 +350,9 @@ class Database:
                     raise ValueError("cannot sell a stock without an open position")
                 if quantity > int(position["quantity"]):
                     raise ValueError("sell quantity exceeds the open position")
-                realized_pnl = round((price - float(position["avg_price"])) * quantity, 2)
+                realized_pnl = round(
+                    (price - float(position["avg_price"])) * quantity * fx_rate, 2
+                )
                 remaining = int(position["quantity"]) - quantity
                 if remaining:
                     connection.execute(
@@ -326,8 +369,8 @@ class Database:
                 INSERT INTO trades(
                     code, name, side, quantity, price, amount, logic,
                     funds_confirmed, space_confirmed, stop_loss, realized_pnl,
-                    violated, note, traded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    violated, note, market, currency, fx_rate, traded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     code,
@@ -343,6 +386,9 @@ class Database:
                     realized_pnl,
                     0,
                     str(values.get("note") or ""),
+                    values.get("market", position.get("market") if position else "A"),
+                    values.get("currency", position.get("currency") if position else "CNY"),
+                    fx_rate,
                     now,
                 ),
             )
@@ -375,7 +421,7 @@ class Database:
 
         invested = float(
             connection.execute(
-                "SELECT COALESCE(SUM(quantity * avg_price), 0) FROM positions"
+                "SELECT COALESCE(SUM(quantity * avg_price * fx_rate), 0) FROM positions"
             ).fetchone()[0]
         )
         realized = float(
@@ -391,7 +437,11 @@ class Database:
                 f"total position would exceed the {max_invested_ratio:.0%} invested limit"
             )
         existing_cost = (
-            int(position["quantity"]) * float(position["avg_price"]) if position else 0.0
+            int(position["quantity"])
+            * float(position["avg_price"])
+            * float(position.get("fx_rate", 1.0))
+            if position
+            else 0.0
         )
         if existing_cost + amount > total_capital * max_ratio + 1e-6:
             raise ValueError(

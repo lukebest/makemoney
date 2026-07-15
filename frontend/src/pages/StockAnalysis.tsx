@@ -21,13 +21,13 @@ export function StockAnalysis() {
 
   const analyze = useCallback(async (value: string) => {
     const normalized = value.trim().toUpperCase()
-    if (!/^(?:\d{6}|(?:SH|SZ)\d{6})$/.test(normalized)) {
-      setError('请输入 6 位股票代码，例如 600519')
+    if (!/^(?:\d{5}|\d{6}|(?:SH|SZ)\d{6}|HK\d{5})$/.test(normalized)) {
+      setError('请输入 6 位 A 股或 5 位港股代码，例如 600519、00700')
       return
     }
     setLoading(true)
     setError('')
-    try { setData(await api.stock(normalized.replace(/^(SH|SZ)/, ''))) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
+    try { setData(await api.stock(normalized.replace(/^(SH|SZ|HK)/, ''))) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
 
   function submit(event: FormEvent) {
@@ -91,10 +91,10 @@ export function StockAnalysis() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="STOCK DIAGNOSIS · 个股诊断" title="不预测，只确认" description="输入代码，观察价格、均线与成交量是否说着同一种语言。" />
+      <PageHeader eyebrow="STOCK DIAGNOSIS · 个股诊断" title="不预测，只确认" description="支持 A 股与港股（含港股通标的），观察价格、均线与成交量是否说着同一种语言。" />
       <form className="stock-search" onSubmit={submit}>
         <label htmlFor="stock-code">股票代码</label>
-        <input id="stock-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="例如 600519" inputMode="numeric" maxLength={8} />
+        <input id="stock-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="A股 600519 / 港股通 00700" inputMode="numeric" maxLength={8} />
         <Button type="submit" disabled={loading}>{loading ? '诊断中…' : '开始诊断'}</Button>
       </form>
       {loading ? <StatusView state="loading" /> : error ? <StatusView state="error" message={error} /> : !data ? (
@@ -107,9 +107,15 @@ export function StockAnalysis() {
               <span>akshare 上游暂不可用，当前 K 线为模拟数据，不能作为交易依据。</span>
             </div>
           )}
+          {data.source === 'partial' && (
+            <div className="source-notice" role="status">
+              <strong>行情延迟</strong>
+              <span>实时现价暂不可用，当前价格为最近交易日收盘价；K 线仍为真实历史数据。</span>
+            </div>
+          )}
           <section className="stock-ticker">
-            <div><p>{data.code}</p><h2>{data.name}</h2></div>
-            <Metric label="现价" value={Number(data.price).toFixed(2)} />
+            <div><p>{data.code}{data.market === 'HK' ? ' · 港股' : ''}</p><h2>{data.name}</h2></div>
+            <Metric label={`现价 · ${data.currency || 'CNY'}`} value={Number(data.price).toFixed(2)} />
             <Metric label="涨跌幅" value={percent(data.change)} tone={data.change >= 0 ? 'gain' : 'loss'} />
             <Metric label="趋势判定" value={data.trend || '待确认'} note={data.score != null ? `强度 ${data.score}` : undefined} />
           </section>
