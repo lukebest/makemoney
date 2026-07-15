@@ -4,6 +4,7 @@ import type {
   AITradeReviewInput,
   MarketMainline,
   MarketOverview,
+  PortfolioSummary,
   Position,
   PositionInput,
   PreferredStocksData,
@@ -355,14 +356,35 @@ export const api = {
   stock: async (code: string) => normalizeStock(await request<unknown>(`/stocks/${encodeURIComponent(code)}`)),
   async settings(): Promise<Settings> {
     const raw = objectFrom(await request<unknown>('/settings'))
-    return { totalCapital: numberFrom(raw.total_capital ?? raw.totalCapital) }
+    return {
+      totalCapital: numberFrom(raw.total_capital ?? raw.totalCapital),
+      maxPositionRatio: numberFrom(raw.max_position_ratio ?? raw.maxPositionRatio, .3),
+      maxInvestedRatio: numberFrom(raw.max_invested_ratio ?? raw.maxInvestedRatio, .6),
+    }
   },
   async updateSettings(settings: Settings): Promise<Settings> {
     const raw = objectFrom(await request<unknown>('/settings', {
       method: 'PUT',
       body: JSON.stringify({ total_capital: settings.totalCapital }),
     }))
-    return { totalCapital: numberFrom(raw.total_capital ?? raw.totalCapital) }
+    return {
+      totalCapital: numberFrom(raw.total_capital ?? raw.totalCapital),
+      maxPositionRatio: numberFrom(raw.max_position_ratio ?? raw.maxPositionRatio, .3),
+      maxInvestedRatio: numberFrom(raw.max_invested_ratio ?? raw.maxInvestedRatio, .6),
+    }
+  },
+  async positionStatus(): Promise<{ items: Position[]; summary: PortfolioSummary }> {
+    const raw = objectFrom(await request<unknown>('/positions/status'))
+    const summary = objectFrom(raw.summary)
+    return {
+      items: listFrom<unknown>(raw.items, []).map(normalizePosition),
+      summary: {
+        totalCapital: numberFrom(summary.total_capital),
+        investedCost: numberFrom(summary.invested_cost),
+        realizedPnl: numberFrom(summary.realized_pnl),
+        availableFunds: numberFrom(summary.available_funds),
+      },
+    }
   },
   async positions() {
     return listFrom<unknown>(await request<unknown>('/positions'), ['items', 'positions', 'results']).map(normalizePosition)

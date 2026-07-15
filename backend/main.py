@@ -323,15 +323,40 @@ def create_app(
         settings = db.get_settings()
         current = db.portfolio_snapshot()
         cost = payload.quantity * payload.avg_price * values["fx_rate"]
-        if cost > current["available_funds"] + 1e-6:
-            raise HTTPException(status_code=409, detail="insufficient available funds")
-        if cost > float(settings["total_capital"]) * float(settings["max_position_ratio"]):
-            raise HTTPException(status_code=409, detail="position exceeds single-stock limit")
+        single_limit = float(settings["total_capital"]) * float(
+            settings["max_position_ratio"]
+        )
+        invested_limit = float(settings["total_capital"]) * float(
+            settings["max_invested_ratio"]
+        )
+        if cost > single_limit + 1e-6:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"持仓成本 ¥{cost:,.2f} 超过单股仓位上限 ¥{single_limit:,.2f}"
+                    f"（总资金的 {float(settings['max_position_ratio']):.0%}）"
+                ),
+            )
         if (
             float(current["invested_cost"]) + cost
-            > float(settings["total_capital"]) * float(settings["max_invested_ratio"])
+            > invested_limit + 1e-6
         ):
-            raise HTTPException(status_code=409, detail="total invested position exceeds 60% limit")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"新增后投入成本 ¥{float(current['invested_cost']) + cost:,.2f} "
+                    f"超过总仓位上限 ¥{invested_limit:,.2f}"
+                    f"（总资金的 {float(settings['max_invested_ratio']):.0%}）"
+                ),
+            )
+        if cost > float(current["available_funds"]) + 1e-6:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"持仓成本 ¥{cost:,.2f} 超过可用资金 "
+                    f"¥{float(current['available_funds']):,.2f}；请调整数量、成本价或账户总资金"
+                ),
+            )
         try:
             return db.create_position(values)
         except sqlite3.IntegrityError as exc:
@@ -361,10 +386,22 @@ def create_app(
         )
         proposed_cost = quantity * avg_price * fx_rate
         other_cost = float(db.portfolio_snapshot()["invested_cost"]) - old_cost
-        if proposed_cost > float(settings["total_capital"]) * float(settings["max_position_ratio"]):
-            raise HTTPException(status_code=409, detail="position exceeds single-stock limit")
-        if other_cost + proposed_cost > float(settings["total_capital"]) * float(settings["max_invested_ratio"]):
-            raise HTTPException(status_code=409, detail="total invested position exceeds 60% limit")
+        single_limit = float(settings["total_capital"]) * float(
+            settings["max_position_ratio"]
+        )
+        invested_limit = float(settings["total_capital"]) * float(
+            settings["max_invested_ratio"]
+        )
+        if proposed_cost > single_limit + 1e-6:
+            raise HTTPException(
+                status_code=409,
+                detail=f"持仓成本 ¥{proposed_cost:,.2f} 超过单股仓位上限 ¥{single_limit:,.2f}",
+            )
+        if other_cost + proposed_cost > invested_limit + 1e-6:
+            raise HTTPException(
+                status_code=409,
+                detail=f"修改后投入成本 ¥{other_cost + proposed_cost:,.2f} 超过总仓位上限 ¥{invested_limit:,.2f}",
+            )
         updates = _dump(payload, exclude_unset=True)
         updates["fx_rate"] = fx_rate
         result = db.update_position(code, updates)

@@ -162,7 +162,16 @@ export interface PreferredStocksData {
 
 export interface Settings {
   totalCapital: number
+  maxPositionRatio?: number
+  maxInvestedRatio?: number
   updatedAt?: string
+}
+
+export interface PortfolioSummary {
+  totalCapital: number
+  investedCost: number
+  realizedPnl: number
+  availableFunds: number
 }
 
 export interface Position {

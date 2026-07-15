@@ -3,27 +3,30 @@ import type { EChartsOption } from 'echarts'
 import { api, errorMessage } from '../api'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, money, percent } from '../components/ui'
-import type { Position, PositionInput, Settings } from '../types'
+import type { PortfolioSummary, Position, PositionInput, Settings } from '../types'
 
 const emptyForm: PositionInput = { code: '', name: '', quantity: 0, costPrice: 0, currentPrice: 0, stopPrice: 0, tier: 1, note: '' }
 
 export function Positions() {
   const [positions, setPositions] = useState<Position[]>([])
   const [settings, setSettings] = useState<Settings>({ totalCapital: 0 })
+  const [portfolio, setPortfolio] = useState<PortfolioSummary>({ totalCapital: 0, investedCost: 0, realizedPnl: 0, availableFunds: 0 })
   const [form, setForm] = useState<PositionInput>(emptyForm)
   const [editingId, setEditingId] = useState<Position['id']>()
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [formError, setFormError] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const [positionData, settingData] = await Promise.all([api.positions(), api.settings()])
-      setPositions(positionData)
-      setSettings({ totalCapital: Number(settingData.totalCapital ?? (settingData as unknown as { total_capital?: number }).total_capital ?? 0) })
+      const [positionData, settingData] = await Promise.all([api.positionStatus(), api.settings()])
+      setPositions(positionData.items)
+      setPortfolio(positionData.summary)
+      setSettings(settingData)
     } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
   useEffect(() => { void load() }, [load])
@@ -41,6 +44,27 @@ export function Positions() {
       marketValue > settings.totalCapital * .6 ? '现金预备队低于40%' : '',
     ].filter(Boolean)
     : []
+  const editingPosition = positions.find((position) => position.id === editingId)
+  const editingCost = editingPosition
+    ? (editingPosition.costValue ?? editingPosition.quantity * editingPosition.costPrice * (editingPosition.fxRate || 1))
+    : 0
+  const isHongKongForm = /^(?:HK)?\d{5}$/i.test(form.code.trim())
+  const estimateFxRate = editingPosition?.fxRate || (isHongKongForm ? .87 : 1)
+  const estimatedCost = form.quantity * form.costPrice * estimateFxRate
+  const otherInvested = Math.max(0, portfolio.investedCost - editingCost)
+  const singleLimit = settings.totalCapital * (settings.maxPositionRatio ?? .3)
+  const investedLimit = settings.totalCapital * (settings.maxInvestedRatio ?? .6)
+  const spendableFunds = portfolio.availableFunds + editingCost
+  const exactEstimate = !isHongKongForm || Boolean(editingPosition)
+  const positionLimitError = exactEstimate && estimatedCost > 0
+    ? estimatedCost > singleLimit
+      ? `持仓成本 ${money(estimatedCost)} 超过单股仓位上限 ${money(singleLimit)}`
+      : otherInvested + estimatedCost > investedLimit
+        ? `新增后投入成本 ${money(otherInvested + estimatedCost)} 超过总仓位上限 ${money(investedLimit)}`
+        : estimatedCost > spendableFunds
+          ? `持仓成本 ${money(estimatedCost)} 超过可用资金 ${money(spendableFunds)}`
+          : ''
+    : ''
 
   const donutOption = useMemo<EChartsOption>(() => {
     const cash = Math.max(0, settings.totalCapital - marketValue)
@@ -62,10 +86,11 @@ export function Positions() {
 
   async function saveCapital(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    try { setSettings(await api.updateSettings(settings)) } catch (e) { setError(errorMessage(e)) }
+    try { await api.updateSettings(settings); await load() } catch (e) { setError(errorMessage(e)) }
   }
 
   function beginEdit(position?: Position) {
+    setFormError('')
     if (position) {
       setEditingId(position.id)
       setForm({
@@ -78,14 +103,18 @@ export function Positions() {
 
   async function savePosition(event: FormEvent) {
     event.preventDefault()
+    if (positionLimitError) {
+      setFormError(positionLimitError)
+      return
+    }
     setSaving(true)
-    setError('')
+    setFormError('')
     try {
       if (editingId != null) await api.updatePosition(editingId, form)
       else await api.createPosition(form)
       setOpen(false)
       await load()
-    } catch (e) { setError(errorMessage(e)) } finally { setSaving(false) }
+    } catch (e) { setFormError(errorMessage(e)) } finally { setSaving(false) }
   }
 
   async function remove(position: Position) {
@@ -108,7 +137,7 @@ export function Positions() {
               <div className="metric-row">
                 <Metric label="持仓市值" value={money(marketValue)} />
                 <Metric label="浮动盈亏" value={money(pnl)} tone={pnl >= 0 ? 'gain' : 'loss'} note={cost ? percent(pnl / cost * 100) : '0.00%'} />
-                <Metric label="可用现金" value={money(Math.max(0, settings.totalCapital - marketValue))} />
+                <Metric label="可用资金" value={money(Math.max(0, portfolio.availableFunds))} note="按持仓成本与已实现盈亏计算" />
               </div>
             </Panel>
             <Panel title="三三四仓位结构" eyebrow="ALLOCATION"><Chart option={donutOption} className="donut-chart" ariaLabel="三三四仓位配置环形图" /></Panel>
@@ -153,7 +182,15 @@ export function Positions() {
             }} /></label>
             <label className="accent-field">止损价<input required type="number" min="0.01" step="0.01" max={form.costPrice || undefined} value={form.stopPrice || ''} onChange={(e) => setForm({ ...form, stopPrice: Number(e.target.value) })} /><small>默认成本价下方 5%，可按策略调整</small></label>
             <label className="full">持仓备注<textarea rows={3} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} placeholder="买入逻辑、观察条件…" /></label>
-            <div className="dialog-actions full"><Button type="button" tone="ghost" onClick={() => setOpen(false)}>取消</Button><Button type="submit" disabled={saving}>{saving ? '保存中…' : '保存持仓'}</Button></div>
+            <div className="position-cost-preview full">
+              <span>预计占用</span><strong>{money(estimatedCost)}</strong>
+              <small>
+                可用 {money(spendableFunds)} · 单股上限 {money(singleLimit)} · 总仓位上限 {money(investedLimit)}
+                {isHongKongForm && !editingPosition ? ' · 港股按参考汇率估算，最终以后端实时汇率为准' : ''}
+              </small>
+            </div>
+            {(formError || positionLimitError) && <p className="form-message error full" role="alert">{formError || positionLimitError}。请调整数量、成本价或账户总资金。</p>}
+            <div className="dialog-actions full"><Button type="button" tone="ghost" onClick={() => setOpen(false)}>取消</Button><Button type="submit" disabled={saving || Boolean(positionLimitError)}>{saving ? '保存中…' : '保存持仓'}</Button></div>
           </form>
         </section>
       </div>}

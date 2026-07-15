@@ -146,6 +146,24 @@ def test_hong_kong_connect_buy_allows_non_a_share_lot(tmp_path):
         assert trade["fx_rate"] == 0.87
 
 
+def test_position_limit_error_explains_cost_and_limit(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post(
+            "/api/positions",
+            json={
+                "code": "600519",
+                "name": "贵州茅台",
+                "quantity": 100,
+                "avg_price": 1240,
+                "stop_loss": 1178,
+            },
+        )
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "持仓成本 ¥124,000.00" in detail
+        assert "单股仓位上限 ¥30,000.00" in detail
+
+
 def test_buy_requires_discipline_and_updates_review(tmp_path):
     with make_client(tmp_path) as client:
         rejected = client.post(
