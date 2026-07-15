@@ -1,4 +1,7 @@
 import type {
+  AIResult,
+  AIStatus,
+  AITradeReviewInput,
   MarketOverview,
   Position,
   PositionInput,
@@ -97,6 +100,9 @@ function normalizeMarket(value: unknown): MarketOverview {
 function normalizeStock(value: unknown): StockAnalysis {
   const raw = objectFrom(value)
   const checks = listFrom<JsonObject>(raw.checklist ?? raw.checks, [])
+  const chan = objectFrom(raw.chan)
+  const pivot = chan.pivot ? objectFrom(chan.pivot) : null
+  const thirdBuy = chan.third_buy ? objectFrom(chan.third_buy) : null
   const trendCode = stringFrom(raw.trend)
   const trendNames: Record<string, string> = {
     up: '多头排列',
@@ -136,6 +142,22 @@ function normalizeStock(value: unknown): StockAnalysis {
     market: stringFrom(raw.market, 'A') as StockAnalysis['market'],
     currency: stringFrom(raw.currency, 'CNY') as StockAnalysis['currency'],
     cnyRate: numberFrom(raw.cny_rate, 1),
+    chanPivot: pivot
+      ? {
+          zg: numberFrom(pivot.zg),
+          zd: numberFrom(pivot.zd),
+          startDate: stringFrom(pivot.start_date),
+          endDate: stringFrom(pivot.end_date),
+        }
+      : undefined,
+    chanThirdBuy: thirdBuy
+      ? {
+          date: stringFrom(thirdBuy.date),
+          price: numberFrom(thirdBuy.price),
+          pullbackLow: numberFrom(thirdBuy.pullback_low),
+          zg: numberFrom(thirdBuy.zg),
+        }
+      : undefined,
   }
 }
 
@@ -233,8 +255,38 @@ function normalizeReview(value: unknown): ReviewData {
   }
 }
 
+function normalizeAIResult(value: unknown): AIResult {
+  const raw = objectFrom(value)
+  return {
+    text: stringFrom(raw.text),
+    model: stringFrom(raw.model),
+    generatedAt: stringFrom(raw.generated_at ?? raw.generatedAt),
+  }
+}
+
 export const api = {
   market: async () => normalizeMarket(await request<unknown>('/market/overview')),
+  async aiStatus(): Promise<AIStatus> {
+    const raw = objectFrom(await request<unknown>('/ai/status'))
+    return { available: Boolean(raw.available), model: stringFrom(raw.model) }
+  },
+  aiInterpret: async (code: string) =>
+    normalizeAIResult(await request<unknown>(`/ai/interpret/${encodeURIComponent(code)}`, { method: 'POST' })),
+  aiReviewTrade: async (input: AITradeReviewInput) =>
+    normalizeAIResult(await request<unknown>('/ai/review-trade', {
+      method: 'POST',
+      body: JSON.stringify({
+        code: input.code,
+        price: input.price || undefined,
+        quantity: input.quantity || undefined,
+        stop_loss: input.stopLoss || undefined,
+        logic: input.logic,
+        funds_answer: input.fundsAnswer,
+        space_answer: input.spaceAnswer,
+      }),
+    })),
+  aiReviewReport: async () =>
+    normalizeAIResult(await request<unknown>('/ai/review-report', { method: 'POST' })),
   preferred: async (limit = 8) =>
     normalizePreferred(await request<unknown>(`/market/preferred?limit=${limit}&candidates=${Math.max(limit, 12)}`)),
   stock: async (code: string) => normalizeStock(await request<unknown>(`/stocks/${encodeURIComponent(code)}`)),

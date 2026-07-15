@@ -52,8 +52,35 @@ class DummyMarket:
         }
 
 
-def make_client(tmp_path):
-    app = create_app(tmp_path / "test.db", DummyMarket())
+class DummyAI:
+    available = True
+
+    def __init__(self):
+        self.calls = []
+
+    def status(self):
+        return {"available": self.available, "model": "dummy"}
+
+    def interpret_stock(self, analysis):
+        self.calls.append(("interpret", analysis["code"]))
+        return {"text": f"解读 {analysis['code']}", "model": "dummy"}
+
+    def review_trade(self, trade, analysis, portfolio):
+        self.calls.append(("review_trade", trade["code"]))
+        assert "总资金" in portfolio
+        return {"text": "买入理由勉强", "model": "dummy"}
+
+    def review_report(self, stats, trades):
+        self.calls.append(("report", stats["total_trades"]))
+        return {"text": "复盘报告", "model": "dummy"}
+
+
+class UnavailableAI(DummyAI):
+    available = False
+
+
+def make_client(tmp_path, ai=None):
+    app = create_app(tmp_path / "test.db", DummyMarket(), ai_service=ai or DummyAI())
     return TestClient(app)
 
 
@@ -156,6 +183,50 @@ def test_buy_requires_discipline_and_updates_review(tmp_path):
         review = client.get("/api/review/stats").json()
         assert review["win_rate"] == 1.0
         assert review["realized_pnl"] == 200.0
+
+
+def test_ai_endpoints(tmp_path):
+    ai = DummyAI()
+    with make_client(tmp_path, ai) as client:
+        assert client.get("/api/ai/status").json()["available"] is True
+        interpret = client.post("/api/ai/interpret/600519")
+        assert interpret.status_code == 200
+        assert "600519" in interpret.json()["text"]
+
+        review = client.post(
+            "/api/ai/review-trade",
+            json={
+                "code": "600519",
+                "price": 10,
+                "quantity": 100,
+                "stop_loss": 9,
+                "logic": "趋势向上",
+                "funds_answer": "放量",
+                "space_answer": "空间足够",
+            },
+        )
+        assert review.status_code == 200
+        report = client.post("/api/ai/review-report")
+        assert report.status_code == 200
+        assert [name for name, _ in ai.calls] == ["interpret", "review_trade", "report"]
+
+
+def test_ai_unavailable_returns_503(tmp_path):
+    with make_client(tmp_path, UnavailableAI()) as client:
+        assert client.get("/api/ai/status").json()["available"] is False
+        assert client.post("/api/ai/interpret/600519").status_code == 503
+        assert client.post("/api/ai/review-trade", json={"code": "600519"}).status_code == 503
+        assert client.post("/api/ai/review-report").status_code == 503
+
+
+def test_ai_interpret_refuses_sample_data(tmp_path):
+    class SampleMarket(DummyMarket):
+        def stock_daily(self, code, days):
+            return {"code": code, "klines": [], "source": "sample", "days": days}
+
+    app = create_app(tmp_path / "sample.db", SampleMarket(), ai_service=DummyAI())
+    with TestClient(app) as client:
+        assert client.post("/api/ai/interpret/600519").status_code == 409
 
 
 def test_position_and_journal_crud(tmp_path):

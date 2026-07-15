@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, errorMessage } from '../api'
+import { AICoach } from '../components/AICoach'
 import { Button, PageHeader, Panel, StatusView } from '../components/ui'
 import type { Trade, TradeInput, TradeSide } from '../types'
 
@@ -85,6 +86,21 @@ export function Trades() {
               <label><i>贰</i><span>谁在买？<small>成交量与资金承接是否真实</small></span><textarea required rows={2} value={form.questions?.[1] || ''} onChange={(e) => setQuestion(1, e.target.value)} /></label>
               <label><i>叁</i><span>还能涨吗？<small>上方空间与盈亏比是否合理</small></span><textarea required rows={2} value={form.questions?.[2] || ''} onChange={(e) => setQuestion(2, e.target.value)} /></label>
               <label className="stop-input"><span>预设止损价</span><input required type="number" min="0.01" step="0.01" value={form.stopPrice || ''} onChange={(e) => setForm({ ...form, stopPrice: Number(e.target.value) })} /></label>
+              <AICoach
+                label="AI 审查三问回答"
+                busyLabel="纪律教练审查中…"
+                hint="Grok 对照该股实时信号审查你的买入理由"
+                disabled={!form.code.trim() || !(form.questions?.[0] || '').trim()}
+                run={() => api.aiReviewTrade({
+                  code: form.code.trim().toUpperCase().replace(/^(SH|SZ|HK)/, ''),
+                  price: form.price,
+                  quantity: form.quantity,
+                  stopLoss: form.stopPrice,
+                  logic: form.questions?.[0] || '',
+                  fundsAnswer: form.questions?.[1] || '',
+                  spaceAnswer: form.questions?.[2] || '',
+                })}
+              />
             </fieldset> : <label className="sell-reason">卖出原因<textarea required rows={5} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="止盈、止损、逻辑失效或仓位调整。请诚实记录…" /></label>}
 
             {error && <p className="form-message error" role="alert">{error}</p>}

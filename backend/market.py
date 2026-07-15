@@ -11,6 +11,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
+from .chan import latest_structure
 from .signals import (
     classify_market_phase,
     enrich_klines,
@@ -457,6 +458,7 @@ class MarketService:
             "support": support,
             "resistance": resistance,
             "checklist": stock_checklist(enriched),
+            "chan": latest_structure(enriched),
             "source": source,
             "fallback_reason": fallback_reason,
             "updated_at": _now(),

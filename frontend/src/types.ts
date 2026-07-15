@@ -56,6 +56,29 @@ export interface StockAnalysis {
   market?: 'A' | 'HK'
   currency?: 'CNY' | 'HKD'
   cnyRate?: number
+  chanPivot?: { zg: number; zd: number; startDate: string; endDate: string }
+  chanThirdBuy?: { date: string; price: number; pullbackLow: number; zg: number }
+}
+
+export interface AIResult {
+  text: string
+  model: string
+  generatedAt?: string
+}
+
+export interface AIStatus {
+  available: boolean
+  model: string
+}
+
+export interface AITradeReviewInput {
+  code: string
+  price?: number
+  quantity?: number
+  stopLoss?: number
+  logic: string
+  fundsAnswer: string
+  spaceAnswer: string
 }
 
 export interface PreferredCheck {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { EChartsOption } from 'echarts'
 import { api, errorMessage } from '../api'
+import { AICoach } from '../components/AICoach'
 import { Chart } from '../components/Chart'
 import { Metric, PageHeader, Panel, StatusView, money } from '../components/ui'
 import type { ReviewData } from '../types'
@@ -74,6 +75,17 @@ export function Review() {
               ))}</div> : <div className="clean-record"><span>✓</span><strong>本期无违例</strong><small>守住纪律，比抓住涨停更重要</small></div>}
             </Panel>
           </div>
+
+          <Panel title="AI 复盘报告" eyebrow="AI COACH">
+            <p className="check-intro">Grok 汇总胜率、盈亏比、违纪记录与最近交易的买入逻辑，指出重复出现的坏习惯。</p>
+            <AICoach
+              label="生成 AI 复盘报告"
+              busyLabel="Grok 正在复盘…"
+              hint="样本太少时 AI 会直说，不会过度解读"
+              disabled={!data.tradeCount}
+              run={() => api.aiReviewReport()}
+            />
+          </Panel>
 
           <Panel title="十条致命错误 · 今日自检" eyebrow="FATAL MISTAKES">
             <p className="check-intro">勾选今天发生过的错误。勾选不是羞耻，重复才是。</p>

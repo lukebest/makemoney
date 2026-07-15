@@ -226,6 +226,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--brass); box-shad
 .price-levels { margin: 20px 0 0; padding-top: 14px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; letter-spacing: .04em; }
 .price-levels b { color: var(--brass-light); font: 15px var(--serif); }
 .price-levels span { margin: 0 10px; color: #4b483f; }
+.chan-signal { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--brass); background: rgba(178,151,91,.08); color: var(--brass-light); font: 12px/1.8 var(--serif); letter-spacing: .04em; }
+.ai-coach { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--line-soft); }
+.ai-coach-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ai-coach-head small { color: var(--muted); font-size: 10.5px; letter-spacing: .05em; }
+.ai-note { margin: 12px 0 0; padding: 14px 16px; border-left: 2px solid var(--brass); background: rgba(255,255,255,.015); }
+.ai-note p { margin: 0; color: var(--ivory-dim); font: 13px/1.9 var(--serif); white-space: pre-wrap; }
+.ai-note footer { margin-top: 8px; color: var(--muted); font-size: 10px; letter-spacing: .1em; }
 .check-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .check-list li { display: flex; gap: 12px; padding: 13px; border: 1px solid var(--line-soft); background: rgba(255,255,255,.01); }
 .check-list li > span { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid currentColor; }

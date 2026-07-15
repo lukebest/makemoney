@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
 import { api, errorMessage } from '../api'
+import { AICoach } from '../components/AICoach'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
 import type { KlineBar, StockAnalysis as StockAnalysisData } from '../types'
@@ -131,6 +132,27 @@ export function StockAnalysis() {
                   <span>·</span>
                   压力 <b>{Number(data.resistance || 0).toFixed(2)}</b>
                 </p>
+              )}
+              {data.chanPivot && (
+                <p className="price-levels">
+                  缠论中枢 <b>{data.chanPivot.zd.toFixed(2)} ~ {data.chanPivot.zg.toFixed(2)}</b>
+                  <span>·</span>
+                  {data.chanPivot.startDate} 起
+                </p>
+              )}
+              {data.chanThirdBuy && (
+                <p className="chan-signal">
+                  {data.chanThirdBuy.date} 出现类三买结构：突破中枢上沿 {data.chanThirdBuy.zg.toFixed(2)} 后，
+                  回踩 {data.chanThirdBuy.pullbackLow.toFixed(2)} 未回中枢。若跌回中枢内则信号作废。
+                </p>
+              )}
+              {data.source !== 'sample' && (
+                <AICoach
+                  label="AI 解读这些信号"
+                  busyLabel="Grok 正在解读…"
+                  hint="基于上方机器信号生成，不构成投资建议"
+                  run={() => api.aiInterpret(data.code)}
+                />
               )}
             </Panel>
             <Panel title="入场检查" eyebrow="DISCIPLINE CHECK">

@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .ai import AIService
 from .db import Database
 from .market import MarketService, is_hk_code, normalize_code
 from .signals import review_statistics, stop_loss_status
@@ -56,6 +57,16 @@ class TradeCreate(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class TradeReviewRequest(BaseModel):
+    code: str
+    price: float | None = Field(default=None, gt=0)
+    quantity: int | None = Field(default=None, gt=0)
+    stop_loss: float | None = Field(default=None, gt=0)
+    logic: str = Field(default="", max_length=2000)
+    funds_answer: str = Field(default="", max_length=2000)
+    space_answer: str = Field(default="", max_length=2000)
+
+
 class JournalCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=20000)
@@ -75,15 +86,18 @@ class JournalUpdate(BaseModel):
 def create_app(
     db_path: str | os.PathLike[str] | None = None,
     market_service: MarketService | None = None,
+    ai_service: AIService | None = None,
 ) -> FastAPI:
     database = Database(db_path)
     market = market_service or MarketService()
+    ai = ai_service or AIService()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         database.initialize()
         application.state.db = database
         application.state.market = market
+        application.state.ai = ai
         yield
         market.cache.clear()
 
@@ -153,6 +167,62 @@ def create_app(
             raise HTTPException(status_code=422, detail="provide 1 to 100 stock codes")
         quotes = _market(request).quotes(requested)
         return {"items": [quotes[code] for code in requested]}
+
+    @application.get("/api/ai/status", tags=["ai"])
+    def ai_status(request: Request) -> dict[str, Any]:
+        return _ai(request).status()
+
+    @application.post("/api/ai/interpret/{code}", tags=["ai"])
+    def ai_interpret(code: str, request: Request) -> dict[str, Any]:
+        ai_service = _require_ai(request)
+        try:
+            analysis = _market(request).stock_daily(_valid_code(code), 120)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if analysis["source"] == "sample":
+            raise HTTPException(
+                status_code=409, detail="行情为演示数据，AI 解读已禁用以免误导"
+            )
+        try:
+            return ai_service.interpret_stock(analysis)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @application.post("/api/ai/review-trade", tags=["ai"])
+    def ai_review_trade(payload: TradeReviewRequest, request: Request) -> dict[str, Any]:
+        ai_service = _require_ai(request)
+        code = _valid_code(payload.code)
+        try:
+            analysis = _market(request).stock_daily(code, 120)
+            if analysis["source"] == "sample":
+                analysis = None
+        except Exception:
+            analysis = None
+        db = _db(request)
+        settings = db.get_settings()
+        snapshot = db.portfolio_snapshot()
+        portfolio = {
+            "总资金": settings["total_capital"],
+            "已用资金": snapshot["invested_cost"],
+            "可用资金": snapshot["available_funds"],
+        }
+        trade = _dump(payload)
+        trade["code"] = code
+        try:
+            return ai_service.review_trade(trade, analysis, portfolio)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @application.post("/api/ai/review-report", tags=["ai"])
+    def ai_review_report(request: Request) -> dict[str, Any]:
+        ai_service = _require_ai(request)
+        db = _db(request)
+        trades = db.list_trades(limit=100000)
+        stats = review_statistics(trades)
+        try:
+            return ai_service.review_report(stats, trades)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @application.get("/api/settings", tags=["settings"])
     def get_settings(request: Request) -> dict[str, Any]:
@@ -393,6 +463,20 @@ def _db(request: Request) -> Database:
 
 def _market(request: Request) -> MarketService:
     return request.app.state.market
+
+
+def _ai(request: Request) -> AIService:
+    return request.app.state.ai
+
+
+def _require_ai(request: Request) -> AIService:
+    ai_service = _ai(request)
+    if not ai_service.available:
+        raise HTTPException(
+            status_code=503,
+            detail="AI 服务未启用：需要安装 cursor-sdk 并设置 CURSOR_API_KEY",
+        )
+    return ai_service
 
 
 def _valid_code(code: str) -> str:
