@@ -420,7 +420,7 @@ td i { color: #44423d; font-style: normal; }
   .sidebar { width: 210px; }
   .main-wrap { margin-left: 210px; }
   .temperature-hero { grid-template-columns: 210px 1fr; }
-  .breadth { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); padding: 20px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+  .breadth { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; padding: 20px 0 0; border-left: 0; border-top: 1px solid var(--line); }
   .breadth .metric + .metric { margin: 0; }
   .index-grid { grid-template-columns: repeat(2, 1fr); }
   .mistake-grid { grid-template-columns: repeat(3, 1fr); }

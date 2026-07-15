@@ -57,6 +57,7 @@ export function Dashboard() {
               <Metric label="上涨家数" value={data.advance ?? 0} tone="gain" />
               <Metric label="下跌家数" value={data.decline ?? 0} tone="loss" />
               <Metric label="涨 / 跌停" value={`${data.limitUp ?? 0} / ${data.limitDown ?? 0}`} />
+              <Metric label="炸板 / 量比" value={`${data.fried ?? 0} / ${(data.volumeRatio ?? 1).toFixed(2)}`} />
             </div>
           </section>
 

@@ -18,6 +18,9 @@ export interface MarketOverview {
   decline: number
   limitUp: number
   limitDown: number
+  fried: number
+  volumeRatio: number
+  boardDate?: string
   updatedAt?: string
   source?: string
   fallbackReason?: string

@@ -260,12 +260,21 @@ def classify_market_phase(
     volume_ratio: float = 1.0,
     limit_up_count: int = 0,
     limit_down_count: int = 0,
+    fried_count: int = 0,
 ) -> dict[str, str]:
-    """Map market breadth and momentum to the spring/summer/autumn/winter cycle."""
+    """Map market breadth and momentum to the spring/summer/autumn/winter cycle.
+
+    fried_count is the number of broken limit-up boards (炸板). A high fried
+    ratio means sellers are winning the limit-up battle, which the lecture
+    treats as a cooling or topping signal.
+    """
+    boards = limit_up_count + fried_count
+    fried_ratio = fried_count / boards if boards >= 10 else 0.0
     if (
         index_change_pct <= -1.0
         or advance_ratio < 0.35
         or limit_down_count > max(5, limit_up_count)
+        or (fried_ratio >= 0.6 and volume_ratio < 0.95)
     ):
         return {"code": "winter", "name": "冬藏期", "strategy": "空仓休息，等待风险释放"}
     if (
@@ -273,9 +282,12 @@ def classify_market_phase(
         and advance_ratio >= 0.65
         and volume_ratio >= 1.05
         and limit_up_count >= limit_down_count
+        and fried_ratio < 0.5
     ):
         return {"code": "summer", "name": "夏长期", "strategy": "顺势参与，仍需保留预备资金"}
-    if volume_ratio >= 1.35 and advance_ratio < 0.55:
+    if (volume_ratio >= 1.35 and advance_ratio < 0.55) or (
+        fried_ratio >= 0.5 and volume_ratio >= 1.15
+    ):
         return {"code": "autumn", "name": "秋收期", "strategy": "逐步减仓，锁定已有利润"}
     return {"code": "spring", "name": "春播期", "strategy": "观察待机，小仓验证市场方向"}
 

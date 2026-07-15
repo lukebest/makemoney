@@ -207,6 +207,18 @@ class MarketService:
             breadth = self._breadth(items)
             if spot["source"] == "sample":
                 fallback_reason = fallback_reason or spot.get("fallback_reason")
+            else:
+                boards = self.cache.get_or_load(
+                    "market:boards", 120, self._load_board_pool
+                )
+                if boards.get("available"):
+                    breadth["limit_up"] = boards["limit_up"]
+                    breadth["limit_down"] = boards["limit_down"]
+                    breadth["fried"] = boards["fried"]
+                    breadth["board_date"] = boards["date"]
+                breadth["volume_ratio"] = self.cache.get_or_load(
+                    "market:volume-ratio", 900, self._load_volume_ratio
+                )
         except Exception as exc:
             breadth = self._sample_breadth()
             fallback_reason = fallback_reason or _safe_reason(exc)
@@ -221,6 +233,7 @@ class MarketService:
             breadth["volume_ratio"],
             breadth["limit_up"],
             breadth["limit_down"],
+            breadth.get("fried", 0),
         )
         return {
             "indexes": indexes,
@@ -269,6 +282,62 @@ class MarketService:
             "source": "sample",
             "fallback_reason": "; ".join(errors)[:240] or "HK quote providers unavailable",
         }
+
+    def _load_board_pool(self) -> dict[str, Any]:
+        """Count limit-up, limit-down and broken (炸板) boards.
+
+        Uses the Legu market-activity summary plus the East Money broken-board
+        pool; both answer in a couple of seconds, unlike the full limit-up pool
+        which paginates per stock. Failures are returned (and thus cached)
+        instead of raised so a broken provider does not push the whole
+        overview into sample mode.
+        """
+        try:
+            ak = _import_akshare()
+            rows = _records(ak.stock_market_activity_legu())
+            stats = {str(row.get("item")): row.get("value") for row in rows}
+            limit_up = int(_number(stats.get("涨停")))
+            limit_down = int(_number(stats.get("跌停")))
+            board_date = str(stats.get("统计日期", ""))[:10]
+            if limit_up <= 0 and limit_down <= 0:
+                raise RuntimeError("legu market activity returned no board counts")
+        except Exception as exc:
+            return {"available": False, "reason": _safe_reason(exc)}
+        fried = 0
+        try:
+            stamp = (board_date or date.today().isoformat()).replace("-", "")
+            fried = len(_records(ak.stock_zt_pool_zbgc_em(date=stamp)))
+        except Exception:
+            pass
+        return {
+            "available": True,
+            "date": board_date or date.today().isoformat(),
+            "limit_up": limit_up,
+            "fried": fried,
+            "limit_down": limit_down,
+        }
+
+    def _load_volume_ratio(self) -> float:
+        """Shanghai index volume of the last completed day vs its 5-day average."""
+        try:
+            ak = _import_akshare()
+            records = _records(ak.stock_zh_index_daily(symbol="sh000001"))
+            today_s = date.today().isoformat()
+            volumes = [
+                _number(row.get("volume"))
+                for row in records
+                # Skip today's bar: intraday volume is partial and would
+                # wrongly read as shrinking volume.
+                if str(row.get("date"))[:10] != today_s
+            ]
+            volumes = [volume for volume in volumes if volume > 0][-6:]
+            if len(volumes) == 6:
+                base = sum(volumes[:-1]) / 5
+                if base > 0:
+                    return round(volumes[-1] / base, 4)
+        except Exception:
+            pass
+        return 1.0
 
     def _spot_from_sina(self) -> list[dict[str, Any]]:
         ak = _import_akshare()
@@ -513,6 +582,7 @@ class MarketService:
             "advance_ratio": round(up / len(valid), 4) if valid else 0.5,
             "limit_up": sum(item["change_pct"] >= 9.5 for item in valid),
             "limit_down": sum(item["change_pct"] <= -9.5 for item in valid),
+            "fried": 0,
             "amount": round(sum(item["amount"] for item in valid), 2),
             "volume_ratio": 1.0,
         }
@@ -550,6 +620,7 @@ class MarketService:
             "advance_ratio": 0.5172,
             "limit_up": 47,
             "limit_down": 9,
+            "fried": 12,
             "amount": 786_500_000_000.0,
             "volume_ratio": 0.96,
         }

@@ -40,6 +40,17 @@ def test_market_phase_boundaries():
     assert classify_market_phase(0.2, 0.55)["code"] == "spring"
 
 
+def test_market_phase_uses_fried_boards():
+    # Sellers keep breaking limit-up boards on shrinking volume -> winter.
+    assert classify_market_phase(0.2, 0.5, 0.9, 10, 0, fried_count=20)["code"] == "winter"
+    # Heavy volume with half the boards breaking -> distribution, autumn.
+    assert classify_market_phase(0.5, 0.6, 1.2, 15, 0, fried_count=18)["code"] == "autumn"
+    # Strong day stays summer when boards mostly hold.
+    assert classify_market_phase(1.2, 0.7, 1.2, 30, 2, fried_count=5)["code"] == "summer"
+    # Too few boards in total: fried ratio is noise and must not flip the phase.
+    assert classify_market_phase(0.2, 0.55, 1.0, 3, 0, fried_count=5)["code"] == "spring"
+
+
 def test_preferred_stock_analysis_is_explainable():
     closes = [90 + index * 0.8 for index in range(30)]
     closes.extend([115, 114, 113, 112, 111, 114, 116, 118, 119, 121])
