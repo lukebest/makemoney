@@ -15,6 +15,7 @@ from .chan import latest_structure
 from .signals import (
     classify_market_phase,
     enrich_klines,
+    market_structure_analysis,
     preferred_stock_analysis,
     stock_checklist,
     support_resistance,
@@ -105,6 +106,12 @@ class MarketService:
             lambda: self._load_preferred_stocks(limit, candidate_count),
         )
 
+    def mainline(self) -> dict[str, Any]:
+        """Return today's hot sectors and consecutive-board leader ladder."""
+        return self.cache.get_or_load(
+            "market:mainline", 180, self._load_mainline
+        )
+
     def _load_preferred_stocks(
         self, limit: int, candidate_count: int
     ) -> dict[str, Any]:
@@ -118,7 +125,18 @@ class MarketService:
                 "updated_at": _now(),
             }
 
-        candidates = self._prefilter_candidates(spot["items"], candidate_count)
+        mainline = self.mainline()
+        sector_map = mainline.get("stock_sectors", {})
+        active_sectors = (
+            mainline.get("active_sectors")
+            if mainline.get("source") == "akshare"
+            else None
+        )
+        candidates = self._prefilter_candidates(
+            spot["items"],
+            candidate_count,
+            set(mainline.get("limit_up_codes", [])),
+        )
         results: list[dict[str, Any]] = []
         failures: list[str] = []
         for quote in candidates:
@@ -126,7 +144,10 @@ class MarketService:
             if daily["source"] != "akshare":
                 failures.append(f"{quote['code']}: {daily.get('fallback_reason', 'unavailable')}")
                 continue
-            analysis = preferred_stock_analysis(daily["klines"])
+            sector = sector_map.get(quote["code"])
+            analysis = preferred_stock_analysis(
+                daily["klines"], sector, active_sectors
+            )
             results.append(
                 {
                     "code": quote["code"],
@@ -134,6 +155,8 @@ class MarketService:
                     "price": quote["price"],
                     "change_pct": quote["change_pct"],
                     "amount": quote["amount"],
+                    "sector": sector,
+                    "in_mainline": bool(sector and sector in (active_sectors or [])),
                     **analysis,
                 }
             )
@@ -151,12 +174,15 @@ class MarketService:
             "source": "akshare",
             "fallback_reason": "; ".join(failures)[:240] or None,
             "analyzed_count": len(candidates),
+            "active_sectors": active_sectors or [],
             "updated_at": _now(),
         }
 
     @staticmethod
     def _prefilter_candidates(
-        items: list[dict[str, Any]], limit: int
+        items: list[dict[str, Any]],
+        limit: int,
+        mainline_codes: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         eligible = [
             item
@@ -182,7 +208,16 @@ class MarketService:
         )
         selected: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for item in by_change[:half] + by_amount:
+        mainline_codes = mainline_codes or set()
+        by_mainline = sorted(
+            (item for item in eligible if str(item["code"]) in mainline_codes),
+            key=lambda item: (
+                float(item.get("change_pct", 0)),
+                float(item.get("amount", 0)),
+            ),
+            reverse=True,
+        )
+        for item in by_mainline + by_change[:half] + by_amount:
             code = str(item["code"])
             if code in seen:
                 continue
@@ -282,6 +317,161 @@ class MarketService:
             "items": [],
             "source": "sample",
             "fallback_reason": "; ".join(errors)[:240] or "HK quote providers unavailable",
+        }
+
+    def _load_mainline(self) -> dict[str, Any]:
+        """Load detailed limit-up records and derive sectors/leader ladders."""
+        try:
+            ak = _import_akshare()
+        except Exception as exc:
+            return self._empty_mainline(_safe_reason(exc))
+        errors: list[str] = []
+        for back in range(8):
+            stamp = (date.today() - timedelta(days=back)).strftime("%Y%m%d")
+            try:
+                records = _records(ak.stock_zt_pool_em(date=stamp))
+            except Exception as exc:
+                errors.append(f"{stamp}: {_safe_reason(exc)}")
+                continue
+            if records:
+                return self._analyze_limit_up_pool(records, stamp)
+        return self._empty_mainline(
+            "; ".join(errors)[:240] or "recent limit-up pools are empty"
+        )
+
+    @staticmethod
+    def _analyze_limit_up_pool(
+        records: list[dict[str, Any]], stamp: str
+    ) -> dict[str, Any]:
+        stocks: list[dict[str, Any]] = []
+        sectors: dict[str, list[dict[str, Any]]] = {}
+        for row in records:
+            code = normalize_code(_pick(row, "代码", default=""))
+            name = str(_pick(row, "名称", default=code))
+            sector = str(_pick(row, "所属行业", default="未知行业")).strip() or "未知行业"
+            board_count = max(1, int(_number(_pick(row, "连板数", default=1))))
+            if "ST" in name.upper() or "退" in name:
+                continue
+            stock = {
+                "code": code,
+                "name": name,
+                "sector": sector,
+                "board_count": board_count,
+                "change_pct": _number(_pick(row, "涨跌幅")),
+                "price": _number(_pick(row, "最新价")),
+                "amount": _number(_pick(row, "成交额")),
+                "sealed_amount": _number(_pick(row, "封板资金")),
+                "break_count": int(_number(_pick(row, "炸板次数"))),
+                "limit_up_stats": str(_pick(row, "涨停统计", default="")),
+                "first_sealed_at": str(_pick(row, "首次封板时间", default="")),
+            }
+            if not is_a_share_code(code):
+                continue
+            stocks.append(stock)
+            sectors.setdefault(sector, []).append(stock)
+
+        sector_rows: list[dict[str, Any]] = []
+        for name, members in sectors.items():
+            ranked = sorted(
+                members,
+                key=lambda item: (
+                    int(item["board_count"]),
+                    float(item["sealed_amount"]),
+                    float(item["amount"]),
+                ),
+                reverse=True,
+            )
+            sector_rows.append(
+                {
+                    "name": name,
+                    "limit_up_count": len(members),
+                    "first_board_count": sum(
+                        int(item["board_count"]) == 1 for item in members
+                    ),
+                    "second_plus_count": sum(
+                        int(item["board_count"]) >= 2 for item in members
+                    ),
+                    "max_board": max(int(item["board_count"]) for item in members),
+                    "leader": ranked[0],
+                }
+            )
+        # "一板定热点": first-board breadth comes first. Total breadth and
+        # board height break ties, so one isolated high board cannot define a
+        # whole sector as the main line by itself.
+        sector_rows.sort(
+            key=lambda item: (
+                int(item["first_board_count"]),
+                int(item["limit_up_count"]),
+                int(item["max_board"]),
+            ),
+            reverse=True,
+        )
+        active = [
+            item["name"]
+            for item in sector_rows
+            if int(item["limit_up_count"]) >= 2
+        ][:3]
+        if not active:
+            active = [item["name"] for item in sector_rows[:3]]
+
+        ladder_groups: dict[int, list[dict[str, Any]]] = {}
+        for stock in stocks:
+            if int(stock["board_count"]) >= 2:
+                ladder_groups.setdefault(int(stock["board_count"]), []).append(stock)
+        ladders = [
+            {
+                "board_count": board_count,
+                "stocks": sorted(
+                    members,
+                    key=lambda item: (
+                        float(item["sealed_amount"]),
+                        float(item["amount"]),
+                    ),
+                    reverse=True,
+                ),
+            }
+            for board_count, members in sorted(ladder_groups.items(), reverse=True)
+        ]
+        leaders = [
+            stock
+            for group in ladders
+            for stock in group["stocks"]
+        ][:8]
+        formatted_date = (
+            f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:]}"
+            if len(stamp) == 8
+            else stamp
+        )
+        return {
+            "source": "akshare",
+            "date": formatted_date,
+            "main_sector": active[0] if active else None,
+            "active_sectors": active,
+            "sectors": sector_rows[:8],
+            "ladders": ladders,
+            "leaders": leaders,
+            "stock_sectors": {stock["code"]: stock["sector"] for stock in stocks},
+            "limit_up_codes": [stock["code"] for stock in stocks],
+            "total_count": len(stocks),
+            "fallback_reason": None,
+            "updated_at": _now(),
+        }
+
+    @staticmethod
+    def _empty_mainline(reason: str) -> dict[str, Any]:
+        return {
+            "source": "unavailable",
+            "date": None,
+            "main_sector": None,
+            "active_sectors": [],
+            "sectors": [],
+            "ladders": [],
+            "leaders": [],
+            "stock_sectors": {},
+            "limit_up_codes": [],
+            "total_count": 0,
+            "fallback_reason": reason,
+            "updated_at": _now(),
         }
 
     def _load_board_pool(self) -> dict[str, Any]:
@@ -459,6 +649,7 @@ class MarketService:
             "resistance": resistance,
             "checklist": stock_checklist(enriched),
             "chan": latest_structure(enriched),
+            "structure": market_structure_analysis(enriched),
             "source": source,
             "fallback_reason": fallback_reason,
             "updated_at": _now(),

@@ -36,22 +36,23 @@ export function PreferredStocks() {
       <PageHeader
         eyebrow="SELECTION RADAR · 优选个股"
         title="先缩小范围，再逐一求证"
-        description="按放量入场、短洗盘、价量重心和强势启动四项机器规则筛选；结果只是一份观察清单，不是买入建议。"
+        description="按热点主线、放量入场、短洗盘、价量重心和强势启动五项机器规则筛选；结果只是一份观察清单，不是买入建议。"
         actions={<Button tone="ghost" onClick={() => void load()} disabled={loading}>{loading ? '筛选中…' : '重新筛选'}</Button>}
       />
 
       <Panel className="screen-method">
         <div className="method-lead">
           <span>筛选路径</span>
-          <strong>全市场快照 → 强势与流动性预筛 → 120 日 K 线验证</strong>
+          <strong>涨停主线 → 强势与流动性预筛 → 120 日 K 线验证</strong>
         </div>
         <ol>
           <li><b>01</b><span>主力入场有量</span></li>
           <li><b>02</b><span>洗盘短而可控</span></li>
           <li><b>03</b><span>价量重心上移</span></li>
           <li><b>04</b><span>强势启动信号</span></li>
+          <li><b>05</b><span>处在活跃板块</span></li>
         </ol>
-        <p>活跃板块需结合当日主线人工确认，不计入机器评分。</p>
+        <p>行业首板广度排名前三的热点板块自动进入评分；涨停池不可用时该项不计分。</p>
       </Panel>
 
       {loading ? <StatusView state="loading" message="正在预筛候选并逐只验证 K 线，首次加载可能需要十余秒" /> :
@@ -72,7 +73,7 @@ export function PreferredStocks() {
             <div className="screen-summary">
               <div><span>分析样本</span><strong>{data.analyzedCount}</strong><small>只 / 预筛候选</small></div>
               <div><span>进入清单</span><strong>{data.items.length}</strong><small>只 / 按分数排序</small></div>
-              <div><span>评分口径</span><strong>4 × 25</strong><small>分 / 机器规则</small></div>
+              <div><span>评分口径</span><strong>5 × 20</strong><small>分 / 机器规则</small></div>
               <time>{data.updatedAt ? `更新于 ${new Date(data.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '实时计算'}</time>
             </div>
 
@@ -84,6 +85,7 @@ export function PreferredStocks() {
                     <div className="preferred-identity">
                       <small>{stock.code}</small>
                       <h2>{stock.name}</h2>
+                      {stock.sector && <small className={stock.inMainline ? 'sector-tag active' : 'sector-tag'}>{stock.sector}{stock.inMainline ? ' · 主线' : ''}</small>}
                       <div>
                         <b>{stock.price.toFixed(2)}</b>
                         <em className={stock.change >= 0 ? 'gain' : 'loss'}>{percent(stock.change)}</em>

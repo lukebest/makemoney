@@ -103,3 +103,33 @@ def test_prefilter_balances_momentum_and_liquidity():
     selected = MarketService._prefilter_candidates(items, 3)
 
     assert [item["code"] for item in selected] == ["000001", "000003", "000002"]
+
+
+def test_mainline_uses_first_boards_for_sector_and_second_boards_for_leaders():
+    result = MarketService._analyze_limit_up_pool(
+        [
+            {"代码": "000001", "名称": "医药甲", "所属行业": "医疗器械", "连板数": 1, "封板资金": 10},
+            {"代码": "000002", "名称": "医药乙", "所属行业": "医疗器械", "连板数": 1, "封板资金": 20},
+            {"代码": "000003", "名称": "医药龙", "所属行业": "医疗器械", "连板数": 2, "封板资金": 30},
+            {"代码": "600001", "名称": "电网龙", "所属行业": "电网设备", "连板数": 3, "封板资金": 50},
+            {"代码": "600002", "名称": "电网乙", "所属行业": "电网设备", "连板数": 1, "封板资金": 10},
+        ],
+        "20260715",
+    )
+
+    assert result["main_sector"] == "医疗器械"
+    assert result["active_sectors"] == ["医疗器械", "电网设备"]
+    assert result["sectors"][0]["first_board_count"] == 2
+    assert result["ladders"][0]["board_count"] == 3
+    assert result["ladders"][0]["stocks"][0]["name"] == "电网龙"
+    assert result["stock_sectors"]["000003"] == "医疗器械"
+
+
+def test_prefilter_puts_mainline_limit_up_stocks_first():
+    items = [
+        {"code": "000001", "name": "普通高涨", "change_pct": 9.9, "amount": 10_000},
+        {"code": "000002", "name": "主线股", "change_pct": 2.0, "amount": 100},
+        {"code": "000003", "name": "普通高量", "change_pct": 3.0, "amount": 20_000},
+    ]
+    selected = MarketService._prefilter_candidates(items, 2, {"000002"})
+    assert [item["code"] for item in selected] == ["000002", "000001"]

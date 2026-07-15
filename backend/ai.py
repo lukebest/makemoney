@@ -73,13 +73,15 @@ class AIService:
                 for item in analysis.get("checklist") or []
             ],
             "缠论结构": analysis.get("chan"),
+            "主力阶段与承接": analysis.get("structure"),
             "近20日收盘": [round(float(row["close"]), 2) for row in recent],
             "近20日成交量": [float(row.get("volume", 0)) for row in recent],
         }
         prompt = (
             f"{_COMMON_RULES}\n"
             "任务：为散户解读下面这只股票的机器信号。说明当前趋势结构意味着什么、"
-            "哪些检查项没通过及其含义、缠论中枢/类三买（如有）该怎么理解，"
+            "哪些检查项没通过及其含义、疑似主力阶段与承接意味着什么、"
+            "缠论中枢/类三买（如有）该怎么理解，"
             "最后给出这只票当前“该做的事”（观察/等待/若持有注意什么），落脚在纪律而非预测。\n\n"
             f"数据：\n{json.dumps(digest, ensure_ascii=False)}"
         )
@@ -117,7 +119,18 @@ class AIService:
                     for item in analysis.get("checklist") or []
                 ],
                 "缠论结构": analysis.get("chan"),
+                "主力阶段与承接": analysis.get("structure"),
             }
+        hard_warnings: list[str] = []
+        if analysis is None:
+            hard_warnings.append("历史行情不可用，无法验证是否处于上升趋势")
+        elif analysis.get("trend") != "up":
+            hard_warnings.append(
+                "非上升趋势：不符合“顺势而为、只做主升浪”的买入纪律"
+            )
+        structure = (analysis or {}).get("structure") or {}
+        if structure.get("phase") == "distribution":
+            hard_warnings.append("量价规则判定为疑似出货阶段，禁止把放量误当成主升确认")
         prompt = (
             f"{_COMMON_RULES}\n"
             "任务：作为买入前的最后一道纪律关卡，审查这位散户的“买入三问”回答。逐问指出："
@@ -126,7 +139,10 @@ class AIService:
             "最后给出明确结论：这次买入理由“扎实 / 勉强 / 不成立”，以及最需要补答的一个问题。\n\n"
             f"数据：\n{json.dumps(digest, ensure_ascii=False)}"
         )
-        return self._respond(prompt)
+        result = self._respond(prompt)
+        result["hard_warnings"] = hard_warnings
+        result["gate_passed"] = not hard_warnings
+        return result
 
     def review_report(
         self, stats: dict[str, Any], trades: list[dict[str, Any]]

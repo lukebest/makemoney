@@ -2,6 +2,7 @@ from backend.signals import (
     classify_market_phase,
     enrich_klines,
     moving_average,
+    market_structure_analysis,
     preferred_stock_analysis,
     review_statistics,
     stop_loss_status,
@@ -80,6 +81,31 @@ def test_preferred_stock_analysis_is_explainable():
     assert result["checks"][-1]["status"] == "manual"
 
 
+def test_preferred_stock_scores_active_sector_automatically():
+    closes = [90 + index * 0.8 for index in range(30)]
+    closes.extend([115, 114, 113, 112, 111, 114, 116, 118, 119, 121])
+    rows = []
+    for index, close in enumerate(closes):
+        volume = 1800.0 if index in (35, 39) else (1300.0 if index >= 30 else 1000.0)
+        rows.append(
+            {
+                "date": f"2026-02-{index + 1:02d}",
+                "open": close - 0.3,
+                "close": close,
+                "high": 120.0 if index == 30 else close + 0.5,
+                "low": 110.0 if index == 34 else close - 0.5,
+                "volume": volume,
+            }
+        )
+    enriched = enrich_klines(rows)
+    active = preferred_stock_analysis(enriched, "医疗器械", ["医疗器械"])
+    inactive = preferred_stock_analysis(enriched, "银行", ["医疗器械"])
+    assert active["score"] == 100
+    assert active["checks"][-1]["status"] == "passed"
+    assert inactive["score"] == 80
+    assert inactive["checks"][-1]["status"] == "failed"
+
+
 def test_preferred_stock_analysis_rejects_short_history():
     result = preferred_stock_analysis([])
     assert result["score"] == 0
@@ -92,6 +118,49 @@ def test_stop_loss_status_explains_hard_stop_and_ma60():
     assert status["hard_stop"] is True
     assert status["below_ma60"] is True
     assert len(status["reasons"]) == 2
+
+
+def test_market_structure_detects_markup_and_acceptance():
+    rows = []
+    price = 10.0
+    for index in range(60):
+        price *= 1.008
+        volume = 1200.0 if index >= 57 else 1000.0
+        rows.append(
+            {
+                "date": f"2026-03-{index + 1:02d}",
+                "open": price * 0.995,
+                "close": price,
+                "high": price * 1.01,
+                "low": price * 0.99,
+                "volume": volume,
+            }
+        )
+    result = market_structure_analysis(enrich_klines(rows))
+    assert result["phase"] == "markup"
+    assert result["label"] == "疑似拉升（主升）"
+    assert result["acceptance"]["code"] == "strong"
+
+
+def test_market_structure_detects_high_volume_distribution():
+    rows = []
+    for index in range(55):
+        close = 10 + min(index, 49) * 0.12
+        if index >= 50:
+            close = 15.9 + (index % 2) * 0.02
+        rows.append(
+            {
+                "date": f"2026-04-{index + 1:02d}",
+                "open": close,
+                "close": close,
+                "high": close * 1.01,
+                "low": close * 0.99,
+                "volume": 1600.0 if index >= 50 else 1000.0,
+            }
+        )
+    result = market_structure_analysis(enrich_klines(rows))
+    assert result["phase"] == "distribution"
+    assert result["label"] == "疑似出货"
 
 
 def test_review_statistics():

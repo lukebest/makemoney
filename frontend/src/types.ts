@@ -26,6 +26,38 @@ export interface MarketOverview {
   fallbackReason?: string
 }
 
+export interface MainlineStock {
+  code: string
+  name: string
+  sector: string
+  boardCount: number
+  amount: number
+  sealedAmount: number
+  breakCount: number
+  firstSealedAt?: string
+}
+
+export interface MainlineSector {
+  name: string
+  limitUpCount: number
+  firstBoardCount: number
+  secondPlusCount: number
+  maxBoard: number
+  leader?: MainlineStock
+}
+
+export interface MarketMainline {
+  source: string
+  date?: string
+  mainSector?: string
+  activeSectors: string[]
+  sectors: MainlineSector[]
+  ladders: Array<{ boardCount: number; stocks: MainlineStock[] }>
+  leaders: MainlineStock[]
+  totalCount: number
+  fallbackReason?: string
+}
+
 export interface KlineBar {
   date: string
   open: number
@@ -58,12 +90,27 @@ export interface StockAnalysis {
   cnyRate?: number
   chanPivot?: { zg: number; zd: number; startDate: string; endDate: string }
   chanThirdBuy?: { date: string; price: number; pullbackLow: number; zg: number }
+  structure?: {
+    phase: string
+    label: string
+    summary: string
+    evidence: string[]
+    acceptance: {
+      code: string
+      label: string
+      summary: string
+      change3dPct?: number
+      volumeRatio?: number
+    }
+  }
 }
 
 export interface AIResult {
   text: string
   model: string
   generatedAt?: string
+  hardWarnings: string[]
+  gatePassed?: boolean
 }
 
 export interface AIStatus {
@@ -100,6 +147,8 @@ export interface PreferredStock {
   stopLoss?: number
   washoutDays?: number
   pullbackPct?: number
+  sector?: string
+  inMainline?: boolean
 }
 
 export interface PreferredStocksData {
@@ -107,6 +156,7 @@ export interface PreferredStocksData {
   source?: string
   fallbackReason?: string
   analyzedCount: number
+  activeSectors: string[]
   updatedAt?: string
 }
 

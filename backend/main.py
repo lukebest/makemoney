@@ -140,6 +140,10 @@ def create_app(
     def market_overview(request: Request) -> dict[str, Any]:
         return _market(request).overview()
 
+    @application.get("/api/market/mainline", tags=["market"])
+    def market_mainline(request: Request) -> dict[str, Any]:
+        return _market(request).mainline()
+
     @application.get("/api/market/preferred", tags=["market"])
     def preferred_stocks(
         request: Request,

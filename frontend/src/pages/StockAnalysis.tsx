@@ -123,6 +123,30 @@ export function StockAnalysis() {
           <Panel title="量价结构" eyebrow="PRICE · VOLUME" className="chart-panel">
             {data.klines?.length ? <Chart option={chartOption} ariaLabel={`${data.name} K线、均线和成交量图`} className="stock-chart" /> : <StatusView state="empty" message="暂无K线数据" />}
           </Panel>
+          {data.structure && (
+            <Panel title="主力阶段与承接" eyebrow="STRUCTURE · ACCEPTANCE">
+              <div className="structure-cards">
+                <article className={`structure-card phase-${data.structure.phase}`}>
+                  <span>量价阶段</span>
+                  <h3>{data.structure.label}</h3>
+                  <p>{data.structure.summary}</p>
+                  <ul>{data.structure.evidence.map((item) => <li key={item}>{item}</li>)}</ul>
+                </article>
+                <article className={`structure-card acceptance-${data.structure.acceptance.code}`}>
+                  <span>买卖承接</span>
+                  <h3>{data.structure.acceptance.label}</h3>
+                  <p>{data.structure.acceptance.summary}</p>
+                  {(data.structure.acceptance.change3dPct != null || data.structure.acceptance.volumeRatio != null) && (
+                    <small>
+                      近3日涨跌 {data.structure.acceptance.change3dPct?.toFixed(1) ?? '—'}%
+                      {' · '}量比 {data.structure.acceptance.volumeRatio?.toFixed(2) ?? '—'}
+                    </small>
+                  )}
+                </article>
+              </div>
+              <p className="structure-disclaimer">“建仓、洗盘、拉升、出货”均为量价规则的疑似判定，不代表已识别真实交易主体或主力意图。</p>
+            </Panel>
+          )}
           <div className="analysis-grid">
             <Panel title="趋势结论" eyebrow="VERDICT">
               <p className="verdict">{data.summary || data.trend || '趋势信号尚不充分，继续观察。'}</p>

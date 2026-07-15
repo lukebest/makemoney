@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../api'
 import { Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
-import type { MarketOverview, MarketPhase } from '../types'
+import type { MarketMainline, MarketOverview, MarketPhase } from '../types'
 
 const seasons: Array<{ key: MarketPhase; name: string; cn: string; action: string }> = [
   { key: 'spring', name: '春', cn: '复苏', action: '试探布局' },
@@ -12,13 +12,18 @@ const seasons: Array<{ key: MarketPhase; name: string; cn: string; action: strin
 
 export function Dashboard() {
   const [data, setData] = useState<MarketOverview>()
+  const [mainline, setMainline] = useState<MarketMainline>()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
-    try { setData(await api.market()) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
+    try {
+      const [market, line] = await Promise.all([api.market(), api.mainline()])
+      setData(market)
+      setMainline(line)
+    } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
 
   useEffect(() => { void load() }, [load])
@@ -68,6 +73,44 @@ export function Dashboard() {
               </div>
             ))}
           </div>
+
+          <Panel title="热点主线" eyebrow="FIRST BOARD · HOT / SECOND BOARD · LEADER">
+            {mainline?.source === 'akshare' && mainline.sectors.length ? (
+              <div className="mainline-layout">
+                <div className="mainline-answer">
+                  <span>今日主线</span>
+                  <strong>{mainline.mainSector || '待确认'}</strong>
+                  <small>
+                    {mainline.activeSectors.length
+                      ? `热点候选：${mainline.activeSectors.join(' · ')}`
+                      : '涨停广度不足，暂不定义主线'}
+                  </small>
+                  <p>以行业首板广度定热点，以二板及以上连板高度定龙头候选。</p>
+                </div>
+                <div className="hot-sector-grid">
+                  {mainline.sectors.slice(0, 6).map((sector, index) => (
+                    <article key={sector.name} className={index === 0 ? 'hot-sector primary' : 'hot-sector'}>
+                      <div><span>{String(index + 1).padStart(2, '0')}</span><b>{sector.name}</b></div>
+                      <strong>{sector.limitUpCount}<small> 涨停</small></strong>
+                      <p>首板 {sector.firstBoardCount} · 二板+ {sector.secondPlusCount} · 高度 {sector.maxBoard} 板</p>
+                      {sector.leader && <em>领涨 {sector.leader.name} · {sector.leader.boardCount}板</em>}
+                    </article>
+                  ))}
+                </div>
+                <div className="leader-ladder">
+                  <span>连板梯队 · 龙头候选</span>
+                  {mainline.ladders.length ? mainline.ladders.map((ladder) => (
+                    <div key={ladder.boardCount}>
+                      <b>{ladder.boardCount} 板</b>
+                      <p>{ladder.stocks.slice(0, 6).map((stock) => `${stock.name}（${stock.sector}）`).join(' · ')}</p>
+                    </div>
+                  )) : <p>今日暂无二板及以上股票，龙头尚未确认。</p>}
+                </div>
+              </div>
+            ) : (
+              <StatusView state="empty" message={mainline?.fallbackReason || '今日涨停明细暂不可用'} />
+            )}
+          </Panel>
 
           <Panel title="核心指数" eyebrow="INDEX PULSE">
             {data.indices?.length ? <div className="index-grid">

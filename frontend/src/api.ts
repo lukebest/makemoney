@@ -2,6 +2,7 @@ import type {
   AIResult,
   AIStatus,
   AITradeReviewInput,
+  MarketMainline,
   MarketOverview,
   Position,
   PositionInput,
@@ -97,12 +98,53 @@ function normalizeMarket(value: unknown): MarketOverview {
   }
 }
 
+function normalizeMainlineStock(value: unknown) {
+  const raw = objectFrom(value)
+  return {
+    code: stringFrom(raw.code),
+    name: stringFrom(raw.name),
+    sector: stringFrom(raw.sector),
+    boardCount: numberFrom(raw.board_count),
+    amount: numberFrom(raw.amount),
+    sealedAmount: numberFrom(raw.sealed_amount),
+    breakCount: numberFrom(raw.break_count),
+    firstSealedAt: stringFrom(raw.first_sealed_at),
+  }
+}
+
+function normalizeMainline(value: unknown): MarketMainline {
+  const raw = objectFrom(value)
+  return {
+    source: stringFrom(raw.source),
+    date: stringFrom(raw.date),
+    mainSector: stringFrom(raw.main_sector),
+    activeSectors: listFrom<string>(raw.active_sectors, []),
+    sectors: listFrom<JsonObject>(raw.sectors, []).map((sector) => ({
+      name: stringFrom(sector.name),
+      limitUpCount: numberFrom(sector.limit_up_count),
+      firstBoardCount: numberFrom(sector.first_board_count),
+      secondPlusCount: numberFrom(sector.second_plus_count),
+      maxBoard: numberFrom(sector.max_board),
+      leader: sector.leader ? normalizeMainlineStock(sector.leader) : undefined,
+    })),
+    ladders: listFrom<JsonObject>(raw.ladders, []).map((ladder) => ({
+      boardCount: numberFrom(ladder.board_count),
+      stocks: listFrom<unknown>(ladder.stocks, []).map(normalizeMainlineStock),
+    })),
+    leaders: listFrom<unknown>(raw.leaders, []).map(normalizeMainlineStock),
+    totalCount: numberFrom(raw.total_count),
+    fallbackReason: stringFrom(raw.fallback_reason),
+  }
+}
+
 function normalizeStock(value: unknown): StockAnalysis {
   const raw = objectFrom(value)
   const checks = listFrom<JsonObject>(raw.checklist ?? raw.checks, [])
   const chan = objectFrom(raw.chan)
   const pivot = chan.pivot ? objectFrom(chan.pivot) : null
   const thirdBuy = chan.third_buy ? objectFrom(chan.third_buy) : null
+  const structure = raw.structure ? objectFrom(raw.structure) : null
+  const acceptance = structure?.acceptance ? objectFrom(structure.acceptance) : null
   const trendCode = stringFrom(raw.trend)
   const trendNames: Record<string, string> = {
     up: '多头排列',
@@ -158,6 +200,21 @@ function normalizeStock(value: unknown): StockAnalysis {
           zg: numberFrom(thirdBuy.zg),
         }
       : undefined,
+    structure: structure
+      ? {
+          phase: stringFrom(structure.phase),
+          label: stringFrom(structure.label),
+          summary: stringFrom(structure.summary),
+          evidence: listFrom<string>(structure.evidence, []),
+          acceptance: {
+            code: stringFrom(acceptance?.code),
+            label: stringFrom(acceptance?.label),
+            summary: stringFrom(acceptance?.summary),
+            change3dPct: acceptance?.change_3d_pct == null ? undefined : numberFrom(acceptance.change_3d_pct),
+            volumeRatio: acceptance?.volume_ratio == null ? undefined : numberFrom(acceptance.volume_ratio),
+          },
+        }
+      : undefined,
   }
 }
 
@@ -175,6 +232,8 @@ function normalizePreferred(value: unknown): PreferredStocksData {
       stopLoss: item.stop_loss == null ? undefined : numberFrom(item.stop_loss),
       washoutDays: item.washout_days == null ? undefined : numberFrom(item.washout_days),
       pullbackPct: item.pullback_pct == null ? undefined : numberFrom(item.pullback_pct),
+      sector: stringFrom(item.sector),
+      inMainline: Boolean(item.in_mainline),
       checks: listFrom<JsonObject>(item.checks, []).map((check) => ({
         key: stringFrom(check.key),
         label: stringFrom(check.label),
@@ -185,6 +244,7 @@ function normalizePreferred(value: unknown): PreferredStocksData {
     source: stringFrom(raw.source),
     fallbackReason: stringFrom(raw.fallback_reason),
     analyzedCount: numberFrom(raw.analyzed_count),
+    activeSectors: listFrom<string>(raw.active_sectors, []),
     updatedAt: stringFrom(raw.updated_at),
   }
 }
@@ -261,11 +321,14 @@ function normalizeAIResult(value: unknown): AIResult {
     text: stringFrom(raw.text),
     model: stringFrom(raw.model),
     generatedAt: stringFrom(raw.generated_at ?? raw.generatedAt),
+    hardWarnings: listFrom<string>(raw.hard_warnings, []),
+    gatePassed: raw.gate_passed == null ? undefined : Boolean(raw.gate_passed),
   }
 }
 
 export const api = {
   market: async () => normalizeMarket(await request<unknown>('/market/overview')),
+  mainline: async () => normalizeMainline(await request<unknown>('/market/mainline')),
   async aiStatus(): Promise<AIStatus> {
     const raw = objectFrom(await request<unknown>('/ai/status'))
     return { available: Boolean(raw.available), model: stringFrom(raw.model) }

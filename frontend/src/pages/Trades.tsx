@@ -29,13 +29,58 @@ export function Trades() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [trendWarning, setTrendWarning] = useState('')
+  const [trendChecking, setTrendChecking] = useState(false)
+  const [trendCheckedCode, setTrendCheckedCode] = useState('')
   const isHongKong = /^(?:HK)?\d{5}$/i.test(form.code.trim())
+  const normalizedCode = form.code.trim().toUpperCase().replace(/^(SH|SZ|HK)/, '')
+  const trendGateReady = /^(?:\d{5}|\d{6})$/.test(normalizedCode)
+    && trendCheckedCode === normalizedCode
 
   const load = useCallback(async () => {
     setLoading(true)
     try { setTrades(await api.trades()) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    if (side !== 'buy') return
+    const normalized = form.code.trim().toUpperCase().replace(/^(SH|SZ|HK)/, '')
+    if (!/^(?:\d{5}|\d{6})$/.test(normalized)) {
+      setTrendWarning('')
+      setTrendCheckedCode('')
+      return
+    }
+    setTrendWarning('')
+    setTrendCheckedCode('')
+    let cancelled = false
+    const timer = window.setTimeout(async () => {
+      setTrendChecking(true)
+      try {
+        const analysis = await api.stock(normalized)
+        if (cancelled) return
+        const warnings = []
+        if (analysis.trend !== '多头排列') {
+          warnings.push(`当前趋势为“${analysis.trend}”，不符合只做主升浪`)
+        }
+        if (analysis.structure?.phase === 'distribution') {
+          warnings.push('量价规则判定为疑似出货阶段')
+        }
+        setTrendWarning(warnings.join('；'))
+        setTrendCheckedCode(normalized)
+      } catch {
+        if (!cancelled) {
+          setTrendWarning('趋势校验失败，无法确认是否处于主升浪')
+          setTrendCheckedCode(normalized)
+        }
+      } finally {
+        if (!cancelled) setTrendChecking(false)
+      }
+    }, 600)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [form.code, side])
 
   function switchSide(next: TradeSide) {
     setSide(next)
@@ -45,6 +90,11 @@ export function Trades() {
 
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (
+      side === 'buy'
+      && trendWarning
+      && !window.confirm(`纪律闸门：${trendWarning}\n\n该页面记录真实交易。确认仍要记录这笔违背主升浪纪律的买入吗？`)
+    ) return
     setSaving(true)
     setError('')
     setSuccess('')
@@ -86,6 +136,9 @@ export function Trades() {
               <label><i>贰</i><span>谁在买？<small>成交量与资金承接是否真实</small></span><textarea required rows={2} value={form.questions?.[1] || ''} onChange={(e) => setQuestion(1, e.target.value)} /></label>
               <label><i>叁</i><span>还能涨吗？<small>上方空间与盈亏比是否合理</small></span><textarea required rows={2} value={form.questions?.[2] || ''} onChange={(e) => setQuestion(2, e.target.value)} /></label>
               <label className="stop-input"><span>预设止损价</span><input required type="number" min="0.01" step="0.01" value={form.stopPrice || ''} onChange={(e) => setForm({ ...form, stopPrice: Number(e.target.value) })} /></label>
+              {trendChecking && <p className="trend-gate checking">正在校验是否处于主升浪…</p>}
+              {trendWarning && <p className="trend-gate warning" role="alert">纪律闸门：{trendWarning}。提交时必须二次确认。</p>}
+              {!trendChecking && trendCheckedCode && !trendWarning && <p className="trend-gate passed">趋势闸门通过：当前未发现非上升趋势或疑似出货警告。</p>}
               <AICoach
                 label="AI 审查三问回答"
                 busyLabel="纪律教练审查中…"
@@ -105,7 +158,7 @@ export function Trades() {
 
             {error && <p className="form-message error" role="alert">{error}</p>}
             {success && <p className="form-message success" role="status">{success}</p>}
-            <Button type="submit" className="submit-trade" disabled={saving}>{saving ? '正在入账…' : `确认记录${side === 'buy' ? '买入' : '卖出'}`}</Button>
+            <Button type="submit" className="submit-trade" disabled={saving || (side === 'buy' && !trendGateReady)}>{saving ? '正在入账…' : `确认记录${side === 'buy' ? '买入' : '卖出'}`}</Button>
           </form>
         </Panel>
 

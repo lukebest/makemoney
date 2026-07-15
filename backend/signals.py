@@ -92,6 +92,8 @@ def stock_checklist(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 def preferred_stock_analysis(
     rows: Sequence[Mapping[str, Any]],
+    sector: str | None = None,
+    active_sectors: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Score the lecture's stock-selection conditions with explainable rules."""
     if len(rows) < 40:
@@ -175,6 +177,9 @@ def preferred_stock_analysis(
         and float(last.get("volume", 0)) >= average_volume
         and moving_averages_up
     )
+    active_sector = bool(
+        active_sectors is not None and sector and sector in active_sectors
+    )
 
     machine_checks = [
         (
@@ -202,8 +207,19 @@ def preferred_stock_analysis(
             "价格接近20日高点、均线多头且成交量确认",
         ),
     ]
-    score = sum(25 for _, _, passed, _ in machine_checks if passed)
-    setup = "重点观察" if score >= 75 else "继续跟踪" if score >= 50 else "条件不足"
+    if active_sectors is not None:
+        machine_checks.append(
+            (
+                "active_sector",
+                "处在活跃板块",
+                active_sector,
+                f"{sector or '行业未知'}"
+                + ("位于今日热点主线" if active_sector else "不在今日热点主线前三"),
+            )
+        )
+    weight = 100 // len(machine_checks)
+    score = sum(weight for _, _, passed, _ in machine_checks if passed)
+    setup = "重点观察" if score >= 80 else "继续跟踪" if score >= 60 else "条件不足"
     stop_loss = round(min(float(row["low"]) for row in recent[-10:]), 3)
     checks = [
         {
@@ -214,14 +230,15 @@ def preferred_stock_analysis(
         }
         for key, label, passed, detail in machine_checks
     ]
-    checks.append(
-        {
-            "key": "active_sector",
-            "label": "处在活跃板块",
-            "status": "manual",
-            "detail": "板块热度需结合当日主线人工确认，不计入机器评分",
-        }
-    )
+    if active_sectors is None:
+        checks.append(
+            {
+                "key": "active_sector",
+                "label": "处在活跃板块",
+                "status": "manual",
+                "detail": "涨停池暂不可用，本项不计入机器评分",
+            }
+        )
     return {
         "score": score,
         "setup": setup,
@@ -229,6 +246,152 @@ def preferred_stock_analysis(
         "stop_loss": stop_loss,
         "washout_days": washout_days,
         "pullback_pct": round(pullback_pct, 2),
+    }
+
+
+def market_structure_analysis(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Classify observable price-volume structure without claiming intent as fact.
+
+    The names follow the lecture's accumulation/washout/markup/distribution
+    vocabulary, but every result is deliberately prefixed with "疑似": OHLCV
+    can describe behaviour, not prove who traded or why.
+    """
+    if len(rows) < 40:
+        return {
+            "phase": "insufficient",
+            "label": "数据不足",
+            "summary": "至少需要 40 个交易日才能判断量价阶段",
+            "evidence": [],
+            "acceptance": _acceptance_analysis(rows),
+        }
+
+    recent = list(rows[-40:])
+    last = recent[-1]
+    closes = [float(row["close"]) for row in recent]
+    volumes = [float(row.get("volume", 0)) for row in recent]
+    highs = [float(row["high"]) for row in recent]
+    lows = [float(row["low"]) for row in recent]
+    base_volume = _average(volumes[-25:-5])
+    current_volume = _average(volumes[-5:])
+    volume_ratio = current_volume / base_volume if base_volume else 0.0
+    return_5 = closes[-1] / closes[-6] - 1
+    return_20 = closes[-1] / closes[-21] - 1
+    high_20 = max(highs[-20:])
+    low_20 = min(lows[-20:])
+    range_20 = (high_20 - low_20) / low_20 if low_20 else 0.0
+    drawdown = closes[-1] / high_20 - 1 if high_20 else 0.0
+    ma5, ma10, ma20 = last.get("ma5"), last.get("ma10"), last.get("ma20")
+    uptrend = (
+        None not in (ma5, ma10, ma20)
+        and closes[-1] > float(ma5) > float(ma10) > float(ma20)
+    )
+    ma20_rising = (
+        ma20 is not None
+        and recent[-6].get("ma20") is not None
+        and float(ma20) > float(recent[-6]["ma20"])
+    )
+
+    if (
+        closes[-1] >= high_20 * 0.94
+        and volume_ratio >= 1.25
+        and return_5 <= 0.01
+    ):
+        phase = "distribution"
+        label = "疑似出货"
+        summary = "高位放量但价格推进有限，需防止分歧转弱"
+        evidence = [
+            f"近5日量能为前20日的 {volume_ratio:.2f} 倍",
+            f"近5日涨跌 {return_5 * 100:.1f}%，收盘仍靠近20日高位",
+        ]
+    elif uptrend and ma20_rising and return_20 > 0.05 and drawdown >= -0.08:
+        phase = "markup"
+        label = "疑似拉升（主升）"
+        summary = "均线多头且中期趋势抬升，价格保持在阶段高位附近"
+        evidence = [
+            "收盘价、MA5、MA10、MA20 呈多头排列",
+            f"近20日上涨 {return_20 * 100:.1f}%，距20日高点 {abs(drawdown) * 100:.1f}%",
+        ]
+    elif (
+        return_20 > 0.03
+        and -0.12 <= drawdown <= -0.02
+        and return_5 < 0
+        and volume_ratio <= 0.9
+    ):
+        phase = "washout"
+        label = "疑似洗盘"
+        summary = "前期上涨后的缩量回调，回撤尚在可控范围"
+        evidence = [
+            f"近20日仍上涨 {return_20 * 100:.1f}%",
+            f"距高点回撤 {abs(drawdown) * 100:.1f}%，近5日量比 {volume_ratio:.2f}",
+        ]
+    elif range_20 <= 0.16 and 0.9 <= volume_ratio <= 1.35:
+        phase = "accumulation"
+        label = "疑似建仓"
+        summary = "价格在有限区间反复换手，量能保持但方向尚未突破"
+        evidence = [
+            f"近20日振幅 {range_20 * 100:.1f}%",
+            f"近5日量能为前20日的 {volume_ratio:.2f} 倍",
+        ]
+    else:
+        phase = "watch"
+        label = "阶段待确认"
+        summary = "当前量价组合不满足建仓、洗盘、拉升或出货的明确规则"
+        evidence = [
+            f"近20日涨跌 {return_20 * 100:.1f}%",
+            f"近5日量比 {volume_ratio:.2f}",
+        ]
+
+    return {
+        "phase": phase,
+        "label": label,
+        "summary": summary,
+        "evidence": evidence,
+        "metrics": {
+            "return_20_pct": round(return_20 * 100, 2),
+            "drawdown_pct": round(drawdown * 100, 2),
+            "volume_ratio": round(volume_ratio, 2),
+        },
+        "acceptance": _acceptance_analysis(recent),
+    }
+
+
+def _acceptance_analysis(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Translate the lecture's price/volume table into observable acceptance."""
+    if len(rows) < 10:
+        return {
+            "code": "insufficient",
+            "label": "承接数据不足",
+            "summary": "至少需要 10 个交易日",
+        }
+    recent = list(rows[-10:])
+    closes = [float(row["close"]) for row in recent]
+    volumes = [float(row.get("volume", 0)) for row in recent]
+    base = _average(volumes[:-3])
+    current = _average(volumes[-3:])
+    volume_ratio = current / base if base else 0.0
+    change = closes[-1] / closes[-4] - 1
+    if change <= -0.02 and volume_ratio >= 1.05:
+        code, label = "none", "下跌有量 · 无承接"
+        summary = "卖压释放时成交放大，买方承接不足"
+    elif abs(change) < 0.02 and volume_ratio >= 1.05:
+        code, label = "absorbing", "横盘有量 · 有承接"
+        summary = "分歧放大但价格守住区间，存在换手承接"
+    elif change >= 0.02 and volume_ratio >= 1.05:
+        code, label = "strong", "上涨有量 · 强承接"
+        summary = "价格上涨同时成交活跃，买方承接占优"
+    else:
+        code, label = "weak", "量能不足 · 承接待确认"
+        summary = "近三日量价没有给出明确的承接证据"
+    return {
+        "code": code,
+        "label": label,
+        "summary": summary,
+        "change_3d_pct": round(change * 100, 2),
+        "volume_ratio": round(volume_ratio, 2),
     }
 
 

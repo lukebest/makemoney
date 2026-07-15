@@ -51,6 +51,16 @@ class DummyMarket:
             "analyzed_count": candidates,
         }
 
+    def mainline(self):
+        return {
+            "source": "test",
+            "main_sector": "医疗器械",
+            "active_sectors": ["医疗器械"],
+            "sectors": [],
+            "ladders": [],
+            "leaders": [],
+        }
+
 
 class DummyAI:
     available = True
@@ -110,6 +120,7 @@ def test_health_settings_and_cors(tmp_path):
         assert preferred.status_code == 200
         assert preferred.json()["items"][0]["score"] == 75
         assert preferred.json()["analyzed_count"] == 3
+        assert client.get("/api/market/mainline").json()["main_sector"] == "医疗器械"
 
 
 def test_hong_kong_connect_buy_allows_non_a_share_lot(tmp_path):

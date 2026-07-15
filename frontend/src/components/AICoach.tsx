@@ -31,10 +31,15 @@ export function AICoach({ label, busyLabel, hint, disabled, run }: {
       </div>
       {error && <p className="form-message error" role="alert">{error}</p>}
       {result && (
-        <blockquote className="ai-note">
-          <p>{result.text}</p>
-          <footer>{result.model}{result.generatedAt ? ` · ${new Date(result.generatedAt).toLocaleTimeString('zh-CN')}` : ''}</footer>
-        </blockquote>
+        <>
+          {result.hardWarnings.map((warning) => (
+            <p className="ai-hard-warning" role="alert" key={warning}>纪律闸门：{warning}</p>
+          ))}
+          <blockquote className="ai-note">
+            <p>{result.text}</p>
+            <footer>{result.model}{result.generatedAt ? ` · ${new Date(result.generatedAt).toLocaleTimeString('zh-CN')}` : ''}</footer>
+          </blockquote>
+        </>
       )}
     </div>
   )
