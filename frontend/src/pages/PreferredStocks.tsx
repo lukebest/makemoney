@@ -94,7 +94,7 @@ export function PreferredStocks() {
                     </div>
                     <div className="preferred-score">
                       <strong>{stock.score}</strong><span>/ 100</span>
-                      <small className={`setup-${stock.score >= 75 ? 'focus' : stock.score >= 50 ? 'watch' : 'weak'}`}>{stock.setup}</small>
+                      <small className={`setup-${stock.setup === '重点观察' ? 'focus' : stock.setup === '继续跟踪' ? 'watch' : 'weak'}`}>{stock.setup}</small>
                     </div>
                     <ul className="preferred-checks">
                       {stock.checks.map((check) => (
