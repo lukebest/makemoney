@@ -20,7 +20,10 @@ export function Dashboard() {
     setLoading(true)
     setError('')
     try {
-      const [market, line] = await Promise.all([api.market(), api.mainline()])
+      const [market, line] = await Promise.all([
+        api.market(),
+        api.mainline().catch(() => undefined),
+      ])
       setData(market)
       setMainline(line)
     } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }

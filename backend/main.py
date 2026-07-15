@@ -402,6 +402,12 @@ def create_app(
                 status_code=409,
                 detail=f"修改后投入成本 ¥{other_cost + proposed_cost:,.2f} 超过总仓位上限 ¥{invested_limit:,.2f}",
             )
+        spendable_funds = float(db.portfolio_snapshot()["available_funds"]) + old_cost
+        if proposed_cost > spendable_funds + 1e-6:
+            raise HTTPException(
+                status_code=409,
+                detail=f"持仓成本 ¥{proposed_cost:,.2f} 超过可用资金 ¥{spendable_funds:,.2f}",
+            )
         updates = _dump(payload, exclude_unset=True)
         updates["fx_rate"] = fx_rate
         result = db.update_position(code, updates)
