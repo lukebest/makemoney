@@ -2,6 +2,7 @@ import type {
   MarketOverview,
   Position,
   PositionInput,
+  PreferredStocksData,
   ReviewData,
   Settings,
   StockAnalysis,
@@ -132,6 +133,34 @@ function normalizeStock(value: unknown): StockAnalysis {
   }
 }
 
+function normalizePreferred(value: unknown): PreferredStocksData {
+  const raw = objectFrom(value)
+  return {
+    items: listFrom<JsonObject>(raw.items, []).map((item) => ({
+      code: stringFrom(item.code),
+      name: stringFrom(item.name),
+      price: numberFrom(item.price),
+      change: numberFrom(item.change_pct),
+      amount: numberFrom(item.amount),
+      score: numberFrom(item.score),
+      setup: stringFrom(item.setup, '条件不足'),
+      stopLoss: item.stop_loss == null ? undefined : numberFrom(item.stop_loss),
+      washoutDays: item.washout_days == null ? undefined : numberFrom(item.washout_days),
+      pullbackPct: item.pullback_pct == null ? undefined : numberFrom(item.pullback_pct),
+      checks: listFrom<JsonObject>(item.checks, []).map((check) => ({
+        key: stringFrom(check.key),
+        label: stringFrom(check.label),
+        status: stringFrom(check.status, 'failed') as 'passed' | 'failed' | 'manual',
+        detail: stringFrom(check.detail),
+      })),
+    })),
+    source: stringFrom(raw.source),
+    fallbackReason: stringFrom(raw.fallback_reason),
+    analyzedCount: numberFrom(raw.analyzed_count),
+    updatedAt: stringFrom(raw.updated_at),
+  }
+}
+
 function normalizePosition(value: unknown): Position {
   const raw = objectFrom(value)
   const tier = numberFrom(raw.tier, 1)
@@ -191,6 +220,8 @@ function normalizeReview(value: unknown): ReviewData {
 
 export const api = {
   market: async () => normalizeMarket(await request<unknown>('/market/overview')),
+  preferred: async (limit = 8) =>
+    normalizePreferred(await request<unknown>(`/market/preferred?limit=${limit}&candidates=${Math.max(limit, 12)}`)),
   stock: async (code: string) => normalizeStock(await request<unknown>(`/stocks/${encodeURIComponent(code)}`)),
   async settings(): Promise<Settings> {
     const raw = objectFrom(await request<unknown>('/settings'))

@@ -52,6 +52,35 @@ export interface StockAnalysis {
   resistance?: number
 }
 
+export interface PreferredCheck {
+  key: string
+  label: string
+  status: 'passed' | 'failed' | 'manual'
+  detail: string
+}
+
+export interface PreferredStock {
+  code: string
+  name: string
+  price: number
+  change: number
+  amount: number
+  score: number
+  setup: string
+  checks: PreferredCheck[]
+  stopLoss?: number
+  washoutDays?: number
+  pullbackPct?: number
+}
+
+export interface PreferredStocksData {
+  items: PreferredStock[]
+  source?: string
+  fallbackReason?: string
+  analyzedCount: number
+  updatedAt?: string
+}
+
 export interface Settings {
   totalCapital: number
   updatedAt?: string

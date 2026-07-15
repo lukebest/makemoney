@@ -90,6 +90,148 @@ def stock_checklist(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [{"key": key, "label": label, "passed": passed} for key, label, passed in checks]
 
 
+def preferred_stock_analysis(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Score the lecture's stock-selection conditions with explainable rules."""
+    if len(rows) < 40:
+        return {
+            "score": 0,
+            "setup": "数据不足",
+            "checks": [],
+            "stop_loss": None,
+            "washout_days": None,
+            "pullback_pct": None,
+        }
+
+    recent = list(rows[-40:])
+    closes = [float(row["close"]) for row in recent]
+    volumes = [float(row.get("volume", 0)) for row in recent]
+    last = recent[-1]
+
+    base_volume = _average(volumes[-30:-10])
+    recent_volume = _average(volumes[-10:])
+    volume_spikes = sum(
+        volume >= base_volume * 1.5 for volume in volumes[-10:]
+    ) if base_volume else 0
+    volume_ratio = recent_volume / base_volume if base_volume else 0.0
+    volume_pile = volume_ratio >= 1.15 and volume_spikes >= 2
+
+    pattern = recent[-25:]
+    peak_search = pattern[:-3]
+    peak_index = max(
+        range(len(peak_search)),
+        key=lambda index: float(peak_search[index]["high"]),
+    )
+    peak_price = float(pattern[peak_index]["high"])
+    after_peak = pattern[peak_index + 1:-1]
+    trough_offset = (
+        min(
+            range(len(after_peak)),
+            key=lambda index: float(after_peak[index]["low"]),
+        )
+        if after_peak
+        else None
+    )
+    trough_index = peak_index + 1 + trough_offset if trough_offset is not None else None
+    trough_price = (
+        float(pattern[trough_index]["low"]) if trough_index is not None else peak_price
+    )
+    pullback_pct = (
+        max(0.0, (peak_price - trough_price) / peak_price * 100)
+        if peak_price
+        else 0.0
+    )
+    washout_days = trough_index - peak_index if trough_index is not None else 0
+    controlled_washout = (
+        trough_index is not None
+        and 1 <= washout_days <= 10
+        and 0 < pullback_pct <= 12
+        and float(last["close"]) > trough_price
+    )
+
+    prior_close = _average(closes[-10:-5])
+    current_close = _average(closes[-5:])
+    prior_volume = _average(volumes[-10:-5])
+    current_volume = _average(volumes[-5:])
+    price_volume_shift = (
+        current_close > prior_close
+        and current_volume >= prior_volume * 0.8
+    )
+
+    previous_high = max(float(row["high"]) for row in recent[-21:-1])
+    average_volume = _average(volumes[-20:])
+    ma5 = last.get("ma5")
+    ma10 = last.get("ma10")
+    ma20 = last.get("ma20")
+    moving_averages_up = (
+        ma5 is not None
+        and ma10 is not None
+        and ma20 is not None
+        and float(ma5) > float(ma10) > float(ma20)
+    )
+    startup_signal = (
+        float(last["close"]) >= previous_high * 0.98
+        and float(last.get("volume", 0)) >= average_volume
+        and moving_averages_up
+    )
+
+    machine_checks = [
+        (
+            "volume_pile",
+            "主力入场有量",
+            volume_pile,
+            f"近10日量能为前期的 {volume_ratio:.2f} 倍，显著放量 {volume_spikes} 天",
+        ),
+        (
+            "controlled_washout",
+            "洗盘短而可控",
+            controlled_washout,
+            f"高点后 {washout_days} 日见低，最大回撤 {pullback_pct:.1f}%",
+        ),
+        (
+            "price_volume_shift",
+            "洗盘后价量重心上移",
+            price_volume_shift,
+            f"近5日均价较前5日 {'抬升' if current_close > prior_close else '回落'}，量能比 {current_volume / prior_volume:.2f}" if prior_volume else "量能不足",
+        ),
+        (
+            "startup_signal",
+            "强势启动信号",
+            startup_signal,
+            "价格接近20日高点、均线多头且成交量确认",
+        ),
+    ]
+    score = sum(25 for _, _, passed, _ in machine_checks if passed)
+    setup = "重点观察" if score >= 75 else "继续跟踪" if score >= 50 else "条件不足"
+    stop_loss = round(min(float(row["low"]) for row in recent[-10:]), 3)
+    checks = [
+        {
+            "key": key,
+            "label": label,
+            "status": "passed" if passed else "failed",
+            "detail": detail,
+        }
+        for key, label, passed, detail in machine_checks
+    ]
+    checks.append(
+        {
+            "key": "active_sector",
+            "label": "处在活跃板块",
+            "status": "manual",
+            "detail": "板块热度需结合当日主线人工确认，不计入机器评分",
+        }
+    )
+    return {
+        "score": score,
+        "setup": setup,
+        "checks": checks,
+        "stop_loss": stop_loss,
+        "washout_days": washout_days,
+        "pullback_pct": round(pullback_pct, 2),
+    }
+
+
 def stop_loss_status(
     live_price: float,
     stop_loss: float,
@@ -175,3 +317,7 @@ def review_statistics(trades: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 def _greater(left: Any, right: Any) -> bool:
     return left is not None and right is not None and float(left) > float(right)
+
+
+def _average(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else 0.0

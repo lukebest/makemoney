@@ -34,6 +34,20 @@ class DummyMarket:
     def stock_daily(self, code, days):
         return {"code": code, "klines": [], "source": "test", "days": days}
 
+    def preferred_stocks(self, limit, candidates):
+        return {
+            "items": [
+                {
+                    "code": "600519",
+                    "name": "贵州茅台",
+                    "score": 75,
+                    "setup": "重点观察",
+                }
+            ][:limit],
+            "source": "test",
+            "analyzed_count": candidates,
+        }
+
 
 def make_client(tmp_path):
     app = create_app(tmp_path / "test.db", DummyMarket())
@@ -61,6 +75,10 @@ def test_health_settings_and_cors(tmp_path):
         )
         assert preflight.headers["access-control-allow-origin"] == "http://localhost:5173"
         assert client.get("/api/stocks/600519").status_code == 200
+        preferred = client.get("/api/market/preferred?limit=1&candidates=3")
+        assert preferred.status_code == 200
+        assert preferred.json()["items"][0]["score"] == 75
+        assert preferred.json()["analyzed_count"] == 3
 
 
 def test_buy_requires_discipline_and_updates_review(tmp_path):

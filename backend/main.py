@@ -126,6 +126,14 @@ def create_app(
     def market_overview(request: Request) -> dict[str, Any]:
         return _market(request).overview()
 
+    @application.get("/api/market/preferred", tags=["market"])
+    def preferred_stocks(
+        request: Request,
+        limit: int = Query(default=8, ge=1, le=20),
+        candidates: int = Query(default=12, ge=1, le=30),
+    ) -> dict[str, Any]:
+        return _market(request).preferred_stocks(limit, max(limit, candidates))
+
     @application.get("/api/stocks/{code}", tags=["market"])
     @application.get("/api/market/stocks/{code}/daily", tags=["market"])
     def stock_daily(

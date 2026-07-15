@@ -13,6 +13,7 @@ from typing import Any, Callable
 from .signals import (
     classify_market_phase,
     enrich_klines,
+    preferred_stock_analysis,
     stock_checklist,
     support_resistance,
     trend_label,
@@ -78,6 +79,105 @@ class MarketService:
             key, 900, lambda: self._load_stock_daily(code, days)
         )
 
+    def preferred_stocks(
+        self, limit: int = 8, candidate_count: int = 12
+    ) -> dict[str, Any]:
+        limit = max(1, min(limit, 20))
+        candidate_count = max(limit, min(candidate_count, 30))
+        key = f"market:preferred:{limit}:{candidate_count}"
+        return self.cache.get_or_load(
+            key,
+            900,
+            lambda: self._load_preferred_stocks(limit, candidate_count),
+        )
+
+    def _load_preferred_stocks(
+        self, limit: int, candidate_count: int
+    ) -> dict[str, Any]:
+        spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
+        if spot["source"] == "sample":
+            return {
+                "items": [],
+                "source": "sample",
+                "fallback_reason": spot.get("fallback_reason"),
+                "analyzed_count": 0,
+                "updated_at": _now(),
+            }
+
+        candidates = self._prefilter_candidates(spot["items"], candidate_count)
+        results: list[dict[str, Any]] = []
+        failures: list[str] = []
+        for quote in candidates:
+            daily = self.stock_daily(quote["code"], 120)
+            if daily["source"] != "akshare":
+                failures.append(f"{quote['code']}: {daily.get('fallback_reason', 'unavailable')}")
+                continue
+            analysis = preferred_stock_analysis(daily["klines"])
+            results.append(
+                {
+                    "code": quote["code"],
+                    "name": quote["name"],
+                    "price": quote["price"],
+                    "change_pct": quote["change_pct"],
+                    "amount": quote["amount"],
+                    **analysis,
+                }
+            )
+
+        results.sort(
+            key=lambda item: (
+                float(item["score"]),
+                float(item["change_pct"]),
+                float(item["amount"]),
+            ),
+            reverse=True,
+        )
+        return {
+            "items": results[:limit],
+            "source": "akshare",
+            "fallback_reason": "; ".join(failures)[:240] or None,
+            "analyzed_count": len(candidates),
+            "updated_at": _now(),
+        }
+
+    @staticmethod
+    def _prefilter_candidates(
+        items: list[dict[str, Any]], limit: int
+    ) -> list[dict[str, Any]]:
+        eligible = [
+            item
+            for item in items
+            if 1.5 <= float(item.get("change_pct", 0)) <= 20.5
+            and float(item.get("amount", 0)) > 0
+            and "ST" not in str(item.get("name", "")).upper()
+            and "退" not in str(item.get("name", ""))
+        ]
+        half = max(1, (limit + 1) // 2)
+        by_change = sorted(
+            eligible,
+            key=lambda item: (
+                float(item.get("change_pct", 0)),
+                float(item.get("amount", 0)),
+            ),
+            reverse=True,
+        )
+        by_amount = sorted(
+            eligible,
+            key=lambda item: float(item.get("amount", 0)),
+            reverse=True,
+        )
+        selected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in by_change[:half] + by_amount:
+            code = str(item["code"])
+            if code in seen:
+                continue
+            selected.append(item)
+            seen.add(code)
+            if len(selected) >= limit:
+                break
+        return selected
+
     def _load_overview(self) -> dict[str, Any]:
         fallback_reason: str | None = None
         try:
@@ -119,42 +219,56 @@ class MarketService:
         }
 
     def _load_spot(self) -> dict[str, Any]:
-        try:
-            ak = _import_akshare()
-            frame = ak.stock_zh_a_spot_em()
-            records = _records(frame)
-            items = []
-            for row in records:
-                code = normalize_code(_pick(row, "代码", "code", default=""))
-                price = _number(_pick(row, "最新价", "price"))
-                if not re.fullmatch(r"\d{6}", code) or price <= 0:
-                    continue
-                items.append(
-                    {
-                        "code": code,
-                        "name": str(_pick(row, "名称", "name", default=code)),
-                        "price": price,
-                        "change": _number(_pick(row, "涨跌额", "change")),
-                        "change_pct": _number(_pick(row, "涨跌幅", "change_pct")),
-                        "open": _number(_pick(row, "今开", "open")),
-                        "high": _number(_pick(row, "最高", "high")),
-                        "low": _number(_pick(row, "最低", "low")),
-                        "previous_close": _number(_pick(row, "昨收", "previous_close")),
-                        "volume": _number(_pick(row, "成交量", "volume")),
-                        "amount": _number(_pick(row, "成交额", "amount")),
-                        "source": "akshare",
-                    }
-                )
-            if not items:
-                raise RuntimeError("AKShare returned no valid A-share quotes")
-            return {"items": items, "source": "akshare", "fallback_reason": None}
-        except Exception as exc:
-            sample_codes = ["600519", "000001", "300750", "601318", "000858"]
-            return {
-                "items": [self._sample_quote(code) for code in sample_codes],
-                "source": "sample",
-                "fallback_reason": _safe_reason(exc),
-            }
+        errors: list[str] = []
+        # Prefer Sina: East Money full-market spot often aborts mid-pagination.
+        for loader in (self._spot_from_sina, self._spot_from_em):
+            try:
+                items = loader()
+                if items:
+                    return {"items": items, "source": "akshare", "fallback_reason": None}
+                errors.append(f"{loader.__name__}: empty")
+            except Exception as exc:
+                errors.append(f"{loader.__name__}: {_safe_reason(exc)}")
+        sample_codes = ["600519", "000001", "300750", "601318", "000858"]
+        return {
+            "items": [self._sample_quote(code) for code in sample_codes],
+            "source": "sample",
+            "fallback_reason": "; ".join(errors)[:240] or "spot providers unavailable",
+        }
+
+    def _spot_from_sina(self) -> list[dict[str, Any]]:
+        ak = _import_akshare()
+        return self._parse_spot_rows(_records(ak.stock_zh_a_spot()))
+
+    def _spot_from_em(self) -> list[dict[str, Any]]:
+        ak = _import_akshare()
+        return self._parse_spot_rows(_records(ak.stock_zh_a_spot_em()))
+
+    @staticmethod
+    def _parse_spot_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        items = []
+        for row in records:
+            code = normalize_code(_pick(row, "代码", "code", default=""))
+            price = _number(_pick(row, "最新价", "price"))
+            if not re.fullmatch(r"\d{6}", code) or price <= 0:
+                continue
+            items.append(
+                {
+                    "code": code,
+                    "name": str(_pick(row, "名称", "name", default=code)),
+                    "price": price,
+                    "change": _number(_pick(row, "涨跌额", "change")),
+                    "change_pct": _number(_pick(row, "涨跌幅", "change_pct")),
+                    "open": _number(_pick(row, "今开", "open")),
+                    "high": _number(_pick(row, "最高", "high")),
+                    "low": _number(_pick(row, "最低", "low")),
+                    "previous_close": _number(_pick(row, "昨收", "previous_close")),
+                    "volume": _number(_pick(row, "成交量", "volume")),
+                    "amount": _number(_pick(row, "成交额", "amount")),
+                    "source": "akshare",
+                }
+            )
+        return items
 
     def _real_indexes(self) -> list[dict[str, Any]]:
         ak = _import_akshare()
@@ -196,18 +310,7 @@ class MarketService:
     def _load_stock_daily(self, code: str, days: int) -> dict[str, Any]:
         fallback_reason: str | None = None
         try:
-            ak = _import_akshare()
-            end = date.today()
-            start = end - timedelta(days=max(days * 2, 180))
-            frame = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-                adjust="qfq",
-                timeout=10,
-            )
-            rows = self._normalize_klines(_records(frame))[-days:]
+            rows = self._fetch_daily_rows(code, days)
             if len(rows) < 20:
                 raise RuntimeError("AKShare returned insufficient daily history")
             source = "akshare"
@@ -242,6 +345,47 @@ class MarketService:
             "updated_at": _now(),
         }
 
+    def _fetch_daily_rows(self, code: str, days: int) -> list[dict[str, Any]]:
+        ak = _import_akshare()
+        end = date.today()
+        start = end - timedelta(days=max(days * 2, 180))
+        start_s = start.strftime("%Y%m%d")
+        end_s = end.strftime("%Y%m%d")
+        errors: list[str] = []
+
+        # Sina first — East Money hist frequently drops the connection.
+        try:
+            frame = ak.stock_zh_a_daily(
+                symbol=to_sina_symbol(code),
+                start_date=start_s,
+                end_date=end_s,
+                adjust="qfq",
+            )
+            rows = self._normalize_klines(_records(frame))[-days:]
+            if len(rows) >= 20:
+                return rows
+            errors.append("sina: insufficient rows")
+        except Exception as exc:
+            errors.append(f"sina: {_safe_reason(exc)}")
+
+        try:
+            frame = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=start_s,
+                end_date=end_s,
+                adjust="qfq",
+                timeout=10,
+            )
+            rows = self._normalize_klines(_records(frame))[-days:]
+            if len(rows) >= 20:
+                return rows
+            errors.append("em: insufficient rows")
+        except Exception as exc:
+            errors.append(f"em: {_safe_reason(exc)}")
+
+        raise RuntimeError("; ".join(errors) or "daily history unavailable")
+
     @staticmethod
     def _normalize_klines(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -251,6 +395,10 @@ class MarketService:
                 continue
             raw_date = _pick(row, "日期", "date", default="")
             date_value = raw_date.isoformat() if hasattr(raw_date, "isoformat") else str(raw_date)
+            turnover = _number(_pick(row, "换手率", "turnover_rate", "turnover"))
+            # Sina daily returns turnover as a ratio (e.g. 0.0049); EM uses percent.
+            if 0 < turnover < 1:
+                turnover *= 100
             rows.append(
                 {
                     "date": date_value[:10],
@@ -261,10 +409,15 @@ class MarketService:
                     "volume": _number(_pick(row, "成交量", "volume")),
                     "amount": _number(_pick(row, "成交额", "amount")),
                     "change_pct": _number(_pick(row, "涨跌幅", "change_pct")),
-                    "turnover_rate": _number(_pick(row, "换手率", "turnover_rate")),
+                    "turnover_rate": round(turnover, 4),
                 }
             )
         rows.sort(key=lambda item: item["date"])
+        previous = None
+        for item in rows:
+            if item["change_pct"] == 0.0 and previous and previous > 0:
+                item["change_pct"] = round((item["close"] / previous - 1) * 100, 3)
+            previous = item["close"]
         return rows
 
     @staticmethod
@@ -394,6 +547,22 @@ def normalize_code(value: Any) -> str:
     code = re.sub(r"^(sh|sz|bj)", "", code)
     digits = re.sub(r"\D", "", code)
     return digits.zfill(6) if digits and len(digits) <= 6 else digits
+
+
+def to_sina_symbol(code: str) -> str:
+    """Map a 6-digit A-share code to Sina's sh/sz/bj prefix form."""
+    code = normalize_code(code)
+    if code.startswith(("60", "68", "90")):
+        return f"sh{code}"
+    if code.startswith(("00", "30", "20")):
+        return f"sz{code}"
+    if code.startswith(("43", "83", "87", "92")):
+        return f"bj{code}"
+    if code.startswith(("5", "6", "9")):
+        return f"sh{code}"
+    if code.startswith(("4", "8")):
+        return f"bj{code}"
+    return f"sz{code}"
 
 
 def _import_akshare() -> Any:

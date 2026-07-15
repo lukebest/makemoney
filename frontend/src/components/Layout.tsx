@@ -2,6 +2,7 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
 const links = [
   { to: '/', label: '大盘温度', short: '温度', glyph: '温', end: true },
+  { to: '/preferred', label: '优选个股', short: '优选', glyph: '择' },
   { to: '/stock', label: '个股诊断', short: '诊股', glyph: '析' },
   { to: '/positions', label: '仓位管理', short: '仓位', glyph: '仓' },
   { to: '/trades', label: '交易执行', short: '交易', glyph: '执' },
@@ -22,7 +23,7 @@ export function Layout() {
         <nav aria-label="主导航">
           {links.map((link, index) => (
             <NavLink key={link.to} to={link.to} end={link.end} className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
-              <span className="nav-index">0{index + 1}</span>
+              <span className="nav-index">{String(index + 1).padStart(2, '0')}</span>
               <span className="nav-glyph">{link.glyph}</span>
               <span>{link.label}</span>
             </NavLink>

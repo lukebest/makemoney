@@ -2,6 +2,7 @@ from backend.signals import (
     classify_market_phase,
     enrich_klines,
     moving_average,
+    preferred_stock_analysis,
     review_statistics,
     stop_loss_status,
     support_resistance,
@@ -37,6 +38,41 @@ def test_market_phase_boundaries():
     assert classify_market_phase(1.2, 0.7, 1.2, 30, 2)["code"] == "summer"
     assert classify_market_phase(0.2, 0.5, 1.5, 5, 2)["code"] == "autumn"
     assert classify_market_phase(0.2, 0.55)["code"] == "spring"
+
+
+def test_preferred_stock_analysis_is_explainable():
+    closes = [90 + index * 0.8 for index in range(30)]
+    closes.extend([115, 114, 113, 112, 111, 114, 116, 118, 119, 121])
+    rows = []
+    for index, close in enumerate(closes):
+        volume = 1000.0 if index < 30 else 1300.0
+        if index in (35, 39):
+            volume = 1800.0
+        rows.append(
+            {
+                "date": f"2026-01-{index + 1:02d}",
+                "open": close - 0.3,
+                "close": close,
+                "high": 120.0 if index == 30 else close + 0.5,
+                "low": 110.0 if index == 34 else close - 0.5,
+                "volume": volume,
+            }
+        )
+
+    result = preferred_stock_analysis(enrich_klines(rows))
+
+    assert result["score"] == 100
+    assert result["setup"] == "重点观察"
+    assert result["washout_days"] == 4
+    assert result["pullback_pct"] == 8.33
+    assert result["stop_loss"] == 110.0
+    assert result["checks"][-1]["status"] == "manual"
+
+
+def test_preferred_stock_analysis_rejects_short_history():
+    result = preferred_stock_analysis([])
+    assert result["score"] == 0
+    assert result["setup"] == "数据不足"
 
 
 def test_stop_loss_status_explains_hard_stop_and_ma60():

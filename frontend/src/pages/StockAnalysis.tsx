@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
 import { api, errorMessage } from '../api'
 import { Chart } from '../components/Chart'
@@ -19,9 +19,8 @@ export function StockAnalysis() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    const normalized = code.trim().toUpperCase()
+  const analyze = useCallback(async (value: string) => {
+    const normalized = value.trim().toUpperCase()
     if (!/^(?:\d{6}|(?:SH|SZ)\d{6})$/.test(normalized)) {
       setError('请输入 6 位股票代码，例如 600519')
       return
@@ -29,7 +28,20 @@ export function StockAnalysis() {
     setLoading(true)
     setError('')
     try { setData(await api.stock(normalized.replace(/^(SH|SZ)/, ''))) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
+  }, [])
+
+  function submit(event: FormEvent) {
+    event.preventDefault()
+    void analyze(code)
   }
+
+  useEffect(() => {
+    const initialCode = new URLSearchParams(window.location.search).get('code')
+    if (initialCode) {
+      setCode(initialCode)
+      void analyze(initialCode)
+    }
+  }, [analyze])
 
   const chartOption = useMemo<EChartsOption>(() => {
     if (!data?.klines?.length) return {}
