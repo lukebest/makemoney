@@ -675,6 +675,9 @@ def _run_ai_with_credits(
     charge = user.get("openid") != LOCAL_OPENID
     cost = int(config.ai_credit_cost) if charge else 0
     ledger: dict[str, Any] | None = None
+    # Only refund when this request created a new debit. Replaying a successful
+    # request_id must not restore credits that were already consumed.
+    debit_created = False
     if charge:
         try:
             ledger = db.reserve_credits(
@@ -684,6 +687,7 @@ def _run_ai_with_credits(
                 ref_type="ai_debit",
                 ref_id=request_id,
             )
+            debit_created = bool(ledger.get("created"))
         except ValueError as exc:
             if "insufficient credits" in str(exc):
                 raise HTTPException(
@@ -694,7 +698,7 @@ def _run_ai_with_credits(
     try:
         result = runner()
     except RuntimeError as exc:
-        if charge and cost:
+        if charge and cost and debit_created:
             db.refund_credits(
                 user_id,
                 cost,
@@ -704,7 +708,7 @@ def _run_ai_with_credits(
             )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception:
-        if charge and cost:
+        if charge and cost and debit_created:
             db.refund_credits(
                 user_id,
                 cost,
@@ -714,7 +718,7 @@ def _run_ai_with_credits(
             )
         raise
     result = dict(result)
-    result["credits_charged"] = cost
+    result["credits_charged"] = cost if debit_created else 0
     result["credits_balance"] = db.get_credit_balance(user_id)["balance"]
     result["request_id"] = request_id
     result["ledger_id"] = ledger.get("id") if ledger else None

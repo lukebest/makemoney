@@ -939,7 +939,9 @@ class Database:
                     (user_id, ref_id, ref_type, -int(existing["delta"])),
                 ).fetchone()
                 if not reversal:
-                    return dict(existing)
+                    reused = dict(existing)
+                    reused["created"] = False
+                    return reused
                 # Prior attempt was refunded — free the unique key and charge again.
                 archive_ref = f"{ref_id}#closed-{existing['id']}"
                 connection.execute(
@@ -978,7 +980,9 @@ class Database:
             row = connection.execute(
                 "SELECT * FROM credit_ledger WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()
-        return dict(row)
+        created = dict(row)
+        created["created"] = True
+        return created
 
     def refund_credits(
         self,

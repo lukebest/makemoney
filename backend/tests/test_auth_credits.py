@@ -86,6 +86,42 @@ def test_credit_purchase_and_ai_debit_refund(tmp_path, monkeypatch):
         # Successful same request_id stays idempotent.
         again = client.post("/api/ai/interpret/600519?request_id=req-1", headers=headers)
         assert again.status_code == 200
+        assert again.json()["credits_charged"] == 0
+        assert client.get("/api/credits", headers=headers).json()["balance"] == 4
+
+
+def test_idempotent_replay_failure_does_not_refund_prior_success(tmp_path):
+    """Replaying a successful request_id during an outage must not reclaim credits."""
+
+    class FlipAI(DummyAI):
+        def __init__(self):
+            super().__init__()
+            self.mode = "ok"
+
+        def interpret_stock(self, analysis):
+            if self.mode == "fail":
+                raise RuntimeError("cursor down")
+            return super().interpret_stock(analysis)
+
+    ai = FlipAI()
+    with make_client(tmp_path, ai=ai) as client:
+        headers = auth_headers(client, "replay")
+        order = client.post(
+            "/api/orders", headers=headers, json={"sku": "credits_5"}
+        ).json()["order"]
+        client.post(f"/api/orders/{order['id']}/mock-pay", headers=headers)
+
+        ok = client.post("/api/ai/interpret/600519?request_id=stable-1", headers=headers)
+        assert ok.status_code == 200
+        assert ok.json()["credits_charged"] == 1
+        assert client.get("/api/credits", headers=headers).json()["balance"] == 4
+
+        ai.mode = "fail"
+        replay = client.post(
+            "/api/ai/interpret/600519?request_id=stable-1", headers=headers
+        )
+        assert replay.status_code == 502
+        # Prior successful debit must remain consumed.
         assert client.get("/api/credits", headers=headers).json()["balance"] == 4
 
 
