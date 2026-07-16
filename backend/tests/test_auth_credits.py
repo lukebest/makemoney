@@ -207,3 +207,32 @@ def test_legacy_positions_migration_adds_columns_before_pk_rewrite(tmp_path):
     assert rows[0]["user_id"] == LOCAL_USER_ID
     assert rows[0]["market"] == "A"
     assert rows[0]["currency"] == "CNY"
+
+
+def test_mark_order_paid_rejects_non_pending_status(tmp_path):
+    from backend.db import Database
+
+    db = Database(tmp_path / "orders.db")
+    db.initialize()
+    user = db.upsert_user("order-user", mock=True)
+    user_id = int(user["id"])
+    order = db.create_order(
+        user_id=user_id,
+        sku="credits_5",
+        title="体验包",
+        credits=5,
+        amount_fen=100,
+        provider="mock",
+    )
+    with db.transaction() as connection:
+        connection.execute(
+            "UPDATE orders SET status = 'cancelled' WHERE id = ?",
+            (order["id"],),
+        )
+    try:
+        db.mark_order_paid(order["id"], provider_ref="should-fail")
+        assert False, "expected non-pending order to be rejected"
+    except ValueError as exc:
+        assert "pending" in str(exc)
+    assert db.get_credit_balance(user_id)["balance"] == 0
+    assert db.get_order(order["id"])["status"] == "cancelled"

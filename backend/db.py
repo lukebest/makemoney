@@ -249,7 +249,9 @@ class Database:
         }
         if not columns or "user_id" in columns:
             return
-        connection.executescript(
+        # Use execute (not executescript): executescript implicitly COMMITs first
+        # and would break the outer BEGIN IMMEDIATE from self.transaction().
+        connection.execute(
             """
             CREATE TABLE IF NOT EXISTS positions_v2 (
                 user_id INTEGER NOT NULL,
@@ -267,7 +269,7 @@ class Database:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (user_id, code),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
+            )
             """
         )
         tier = "tier" if "tier" in columns else "1"
@@ -1086,10 +1088,14 @@ class Database:
                 raise ValueError("order not found")
             if order["status"] == "paid":
                 return dict(order)
+            if order["status"] != "pending":
+                raise ValueError(
+                    f"order status must be pending to mark paid, got {order['status']}"
+                )
             connection.execute(
                 """
                 UPDATE orders SET status = 'paid', provider_ref = ?, updated_at = ?, paid_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status = 'pending'
                 """,
                 (provider_ref, now, now, order_id),
             )
