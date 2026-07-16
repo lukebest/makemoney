@@ -1,4 +1,4 @@
-"""SQLite persistence for settings, positions, trades, and journals."""
+"""SQLite persistence for users, settings, positions, trades, journals, and credits."""
 
 from __future__ import annotations
 
@@ -6,14 +6,23 @@ import json
 import os
 import sqlite3
 import threading
+import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 
+LOCAL_OPENID = "local-web"
+LOCAL_USER_ID = 1
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 class Database:
@@ -50,10 +59,73 @@ class Database:
         with self.transaction() as connection:
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    openid TEXT NOT NULL UNIQUE,
+                    unionid TEXT,
+                    session_key TEXT NOT NULL DEFAULT '',
+                    mock INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS credit_accounts (
+                    user_id INTEGER PRIMARY KEY,
+                    balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS credit_ledger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    delta INTEGER NOT NULL,
+                    balance_after INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    ref_type TEXT NOT NULL DEFAULT '',
+                    ref_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    UNIQUE(user_id, ref_type, ref_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS orders (
+                    id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    sku TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    credits INTEGER NOT NULL CHECK (credits > 0),
+                    amount_fen INTEGER NOT NULL CHECK (amount_fen > 0),
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'paid', 'cancelled', 'failed')),
+                    provider TEXT NOT NULL,
+                    provider_ref TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    paid_at TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id INTEGER NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, key),
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS positions (
@@ -104,42 +176,18 @@ class Database:
                     FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE SET NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_trades_code_time
-                    ON trades(code, traded_at);
-                CREATE INDEX IF NOT EXISTS idx_journal_created
-                    ON journal(created_at);
+                CREATE INDEX IF NOT EXISTS idx_trades_code_time ON trades(code, traded_at);
+                CREATE INDEX IF NOT EXISTS idx_journal_created ON journal(created_at);
+                CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_ledger_user ON credit_ledger(user_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at);
                 """
             )
-            position_columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(positions)").fetchall()
-            }
-            if "tier" not in position_columns:
-                connection.execute(
-                    "ALTER TABLE positions ADD COLUMN tier INTEGER NOT NULL DEFAULT 1"
-                )
-            for name, definition in (
-                ("market", "TEXT NOT NULL DEFAULT 'A'"),
-                ("currency", "TEXT NOT NULL DEFAULT 'CNY'"),
-                ("fx_rate", "REAL NOT NULL DEFAULT 1"),
-            ):
-                if name not in position_columns:
-                    connection.execute(
-                        f"ALTER TABLE positions ADD COLUMN {name} {definition}"
-                    )
-            trade_columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(trades)").fetchall()
-            }
-            for name, definition in (
-                ("market", "TEXT NOT NULL DEFAULT 'A'"),
-                ("currency", "TEXT NOT NULL DEFAULT 'CNY'"),
-                ("fx_rate", "REAL NOT NULL DEFAULT 1"),
-            ):
-                if name not in trade_columns:
-                    connection.execute(
-                        f"ALTER TABLE trades ADD COLUMN {name} {definition}"
-                    )
+            self._ensure_local_user(connection)
+            self._migrate_user_id_columns(connection)
+            self._migrate_positions_pk(connection)
+            self._migrate_settings_to_user(connection)
+            self._ensure_legacy_columns(connection)
             now = utc_now()
             defaults = {
                 "total_capital": 100000.0,
@@ -148,9 +196,128 @@ class Database:
             }
             for key, value in defaults.items():
                 connection.execute(
+                    """
+                    INSERT OR IGNORE INTO user_settings(user_id, key, value, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (LOCAL_USER_ID, key, json.dumps(value), now),
+                )
+                connection.execute(
                     "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES (?, ?, ?)",
                     (key, json.dumps(value), now),
                 )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO credit_accounts(user_id, balance, updated_at)
+                VALUES (?, 0, ?)
+                """,
+                (LOCAL_USER_ID, now),
+            )
+
+    def _ensure_local_user(self, connection: sqlite3.Connection) -> None:
+        now = utc_now()
+        row = connection.execute(
+            "SELECT id FROM users WHERE openid = ?", (LOCAL_OPENID,)
+        ).fetchone()
+        if row:
+            return
+        # Keep id=1 stable for migrated legacy rows.
+        connection.execute(
+            """
+            INSERT INTO users(id, openid, unionid, session_key, mock, created_at, updated_at)
+            VALUES (?, ?, NULL, '', 1, ?, ?)
+            """,
+            (LOCAL_USER_ID, LOCAL_OPENID, now, now),
+        )
+
+    def _migrate_user_id_columns(self, connection: sqlite3.Connection) -> None:
+        for table in ("trades", "journal"):
+            columns = {
+                row["name"]
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "user_id" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN user_id INTEGER NOT NULL DEFAULT {LOCAL_USER_ID}"
+                )
+
+    def _migrate_positions_pk(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(positions)").fetchall()
+        }
+        if "user_id" in columns:
+            return
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS positions_v2 (
+                user_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT NOT NULL,
+                quantity INTEGER NOT NULL CHECK (quantity > 0),
+                avg_price REAL NOT NULL CHECK (avg_price > 0),
+                stop_loss REAL NOT NULL CHECK (stop_loss > 0),
+                tier INTEGER NOT NULL DEFAULT 1 CHECK (tier BETWEEN 1 AND 3),
+                thesis TEXT NOT NULL DEFAULT '',
+                market TEXT NOT NULL DEFAULT 'A',
+                currency TEXT NOT NULL DEFAULT 'CNY',
+                fx_rate REAL NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, code),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO positions_v2(
+                user_id, code, name, quantity, avg_price, stop_loss, tier, thesis,
+                market, currency, fx_rate, created_at, updated_at
+            )
+            SELECT {LOCAL_USER_ID}, code, name, quantity, avg_price, stop_loss, tier, thesis,
+                   market, currency, fx_rate, created_at, updated_at
+            FROM positions
+            """
+        )
+        connection.execute("DROP TABLE positions")
+        connection.execute("ALTER TABLE positions_v2 RENAME TO positions")
+
+    def _migrate_settings_to_user(self, connection: sqlite3.Connection) -> None:
+        legacy = connection.execute("SELECT key, value, updated_at FROM settings").fetchall()
+        for row in legacy:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO user_settings(user_id, key, value, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (LOCAL_USER_ID, row["key"], row["value"], row["updated_at"]),
+            )
+
+    def _ensure_legacy_columns(self, connection: sqlite3.Connection) -> None:
+        position_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(positions)").fetchall()
+        }
+        for name, definition in (
+            ("tier", "INTEGER NOT NULL DEFAULT 1"),
+            ("market", "TEXT NOT NULL DEFAULT 'A'"),
+            ("currency", "TEXT NOT NULL DEFAULT 'CNY'"),
+            ("fx_rate", "REAL NOT NULL DEFAULT 1"),
+        ):
+            if name not in position_columns:
+                connection.execute(f"ALTER TABLE positions ADD COLUMN {name} {definition}")
+        trade_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        for name, definition in (
+            ("market", "TEXT NOT NULL DEFAULT 'A'"),
+            ("currency", "TEXT NOT NULL DEFAULT 'CNY'"),
+            ("fx_rate", "REAL NOT NULL DEFAULT 1"),
+        ):
+            if name not in trade_columns:
+                connection.execute(f"ALTER TABLE trades ADD COLUMN {name} {definition}")
 
     def healthcheck(self) -> bool:
         try:
@@ -159,50 +326,177 @@ class Database:
         except sqlite3.Error:
             return False
 
-    def get_settings(self) -> dict[str, Any]:
+    # --- users / sessions -------------------------------------------------
+
+    def get_or_create_local_user(self) -> dict[str, Any]:
+        return self.upsert_user(LOCAL_OPENID, session_key="", mock=True)
+
+    def upsert_user(
+        self, openid: str, *, session_key: str = "", mock: bool = False
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE openid = ?", (openid,)
+            ).fetchone()
+            if row:
+                connection.execute(
+                    """
+                    UPDATE users SET session_key = ?, mock = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (session_key, int(mock), now, row["id"]),
+                )
+                user_id = int(row["id"])
+            else:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO users(openid, unionid, session_key, mock, created_at, updated_at)
+                    VALUES (?, NULL, ?, ?, ?, ?)
+                    """,
+                    (openid, session_key, int(mock), now, now),
+                )
+                user_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO credit_accounts(user_id, balance, updated_at)
+                VALUES (?, 0, ?)
+                """,
+                (user_id, now),
+            )
+            for key, value in (
+                ("total_capital", 100000.0),
+                ("max_position_ratio", 0.30),
+                ("max_invested_ratio", 0.60),
+            ):
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO user_settings(user_id, key, value, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (user_id, key, json.dumps(value), now),
+                )
+            user = connection.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return dict(user)
+
+    def create_session(self, user_id: int, *, token_hash: str, ttl_seconds: int) -> None:
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds")
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO sessions(token_hash, user_id, expires_at, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (token_hash, user_id, expires, now.isoformat(timespec="seconds")),
+            )
+
+    def get_user_by_token(self, token_hash: str) -> dict[str, Any] | None:
         with self.connect() as connection:
-            rows = connection.execute("SELECT key, value FROM settings").fetchall()
+            row = connection.execute(
+                """
+                SELECT u.* FROM sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+            if not row:
+                return None
+            expires = connection.execute(
+                "SELECT expires_at FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+        if expires and _parse_utc(expires["expires_at"]) < datetime.now(timezone.utc):
+            with self.transaction() as connection:
+                connection.execute(
+                    "DELETE FROM sessions WHERE token_hash = ?", (token_hash,)
+                )
+            return None
+        data = dict(row)
+        data["mock"] = bool(data.get("mock"))
+        return data
+
+    def delete_session(self, token_hash: str) -> None:
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+
+    # --- settings ---------------------------------------------------------
+
+    def get_settings(self, user_id: int = LOCAL_USER_ID) -> dict[str, Any]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT key, value FROM user_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        if not rows:
+            with self.connect() as connection:
+                rows = connection.execute("SELECT key, value FROM settings").fetchall()
         return {row["key"]: json.loads(row["value"]) for row in rows}
 
-    def set_settings(self, values: Mapping[str, Any]) -> dict[str, Any]:
+    def set_settings(
+        self, values: Mapping[str, Any], user_id: int = LOCAL_USER_ID
+    ) -> dict[str, Any]:
         now = utc_now()
         with self.transaction() as connection:
             for key, value in values.items():
                 connection.execute(
                     """
-                    INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                    INSERT INTO user_settings(user_id, key, value, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id, key) DO UPDATE SET
+                        value = excluded.value,
                         updated_at = excluded.updated_at
                     """,
-                    (key, json.dumps(value), now),
+                    (user_id, key, json.dumps(value), now),
                 )
-        return self.get_settings()
+                if user_id == LOCAL_USER_ID:
+                    connection.execute(
+                        """
+                        INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                            updated_at = excluded.updated_at
+                        """,
+                        (key, json.dumps(value), now),
+                    )
+        return self.get_settings(user_id)
 
-    def list_positions(self) -> list[dict[str, Any]]:
+    # --- positions / portfolio --------------------------------------------
+
+    def list_positions(self, user_id: int = LOCAL_USER_ID) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM positions ORDER BY created_at"
+                "SELECT * FROM positions WHERE user_id = ? ORDER BY created_at",
+                (user_id,),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_position(self, code: str) -> dict[str, Any] | None:
+    def get_position(
+        self, code: str, user_id: int = LOCAL_USER_ID
+    ) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM positions WHERE code = ?", (code,)
+                "SELECT * FROM positions WHERE user_id = ? AND code = ?",
+                (user_id, code),
             ).fetchone()
         return dict(row) if row else None
 
-    def create_position(self, values: Mapping[str, Any]) -> dict[str, Any]:
+    def create_position(
+        self, values: Mapping[str, Any], user_id: int = LOCAL_USER_ID
+    ) -> dict[str, Any]:
         now = utc_now()
         with self.transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO positions(
-                    code, name, quantity, avg_price, stop_loss, tier, thesis,
+                    user_id, code, name, quantity, avg_price, stop_loss, tier, thesis,
                     market, currency, fx_rate, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    user_id,
                     values["code"],
                     values["name"],
                     values["quantity"],
@@ -217,52 +511,72 @@ class Database:
                     now,
                 ),
             )
-        return self.get_position(str(values["code"])) or {}
+        return self.get_position(str(values["code"]), user_id) or {}
 
-    def update_position(self, code: str, values: Mapping[str, Any]) -> dict[str, Any] | None:
+    def update_position(
+        self, code: str, values: Mapping[str, Any], user_id: int = LOCAL_USER_ID
+    ) -> dict[str, Any] | None:
         allowed = {
             "name", "quantity", "avg_price", "stop_loss", "tier", "thesis",
             "market", "currency", "fx_rate",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
-            return self.get_position(code)
+            return self.get_position(code, user_id)
         clauses = [f"{key} = ?" for key in updates]
         params = list(updates.values())
         clauses.append("updated_at = ?")
-        params.extend([utc_now(), code])
+        params.extend([utc_now(), user_id, code])
         with self.transaction() as connection:
             cursor = connection.execute(
-                f"UPDATE positions SET {', '.join(clauses)} WHERE code = ?", params
+                f"UPDATE positions SET {', '.join(clauses)} WHERE user_id = ? AND code = ?",
+                params,
             )
             if cursor.rowcount == 0:
                 return None
-        return self.get_position(code)
+        return self.get_position(code, user_id)
 
-    def delete_position(self, code: str) -> bool:
+    def delete_position(self, code: str, user_id: int = LOCAL_USER_ID) -> bool:
         with self.transaction() as connection:
-            cursor = connection.execute("DELETE FROM positions WHERE code = ?", (code,))
+            cursor = connection.execute(
+                "DELETE FROM positions WHERE user_id = ? AND code = ?",
+                (user_id, code),
+            )
             return cursor.rowcount > 0
 
-    def list_trades(self, limit: int = 200) -> list[dict[str, Any]]:
+    def list_trades(
+        self, limit: int = 200, user_id: int = LOCAL_USER_ID
+    ) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM trades ORDER BY traded_at DESC, id DESC LIMIT ?", (limit,)
+                """
+                SELECT * FROM trades WHERE user_id = ?
+                ORDER BY traded_at DESC, id DESC LIMIT ?
+                """,
+                (user_id, limit),
             ).fetchall()
         return [self._normalize_trade(dict(row)) for row in rows]
 
-    def portfolio_snapshot(self) -> dict[str, float]:
-        settings = self.get_settings()
+    def portfolio_snapshot(self, user_id: int = LOCAL_USER_ID) -> dict[str, float]:
+        settings = self.get_settings(user_id)
         total_capital = float(settings.get("total_capital", 100000.0))
         with self.connect() as connection:
             invested = float(
                 connection.execute(
-                    "SELECT COALESCE(SUM(quantity * avg_price * fx_rate), 0) FROM positions"
+                    """
+                    SELECT COALESCE(SUM(quantity * avg_price * fx_rate), 0)
+                    FROM positions WHERE user_id = ?
+                    """,
+                    (user_id,),
                 ).fetchone()[0]
             )
             realized = float(
                 connection.execute(
-                    "SELECT COALESCE(SUM(realized_pnl), 0) FROM trades WHERE side = 'sell'"
+                    """
+                    SELECT COALESCE(SUM(realized_pnl), 0)
+                    FROM trades WHERE user_id = ? AND side = 'sell'
+                    """,
+                    (user_id,),
                 ).fetchone()[0]
             )
         return {
@@ -272,7 +586,9 @@ class Database:
             "available_funds": round(total_capital + realized - invested, 2),
         }
 
-    def execute_trade(self, values: Mapping[str, Any]) -> dict[str, Any]:
+    def execute_trade(
+        self, values: Mapping[str, Any], user_id: int = LOCAL_USER_ID
+    ) -> dict[str, Any]:
         """Validate and atomically persist a buy or sell and its position."""
         code = str(values["code"])
         side = str(values["side"]).lower()
@@ -283,14 +599,16 @@ class Database:
         now = utc_now()
         with self.transaction() as connection:
             settings_rows = connection.execute(
-                "SELECT key, value FROM settings"
+                "SELECT key, value FROM user_settings WHERE user_id = ?",
+                (user_id,),
             ).fetchall()
             settings = {row["key"]: json.loads(row["value"]) for row in settings_rows}
             total_capital = float(settings.get("total_capital", 100000.0))
             max_ratio = float(settings.get("max_position_ratio", 0.30))
             max_invested_ratio = float(settings.get("max_invested_ratio", 0.60))
             position_row = connection.execute(
-                "SELECT * FROM positions WHERE code = ?", (code,)
+                "SELECT * FROM positions WHERE user_id = ? AND code = ?",
+                (user_id, code),
             ).fetchone()
             position = dict(position_row) if position_row else None
             realized_pnl: float | None = None
@@ -304,6 +622,7 @@ class Database:
                     total_capital,
                     max_ratio,
                     max_invested_ratio,
+                    user_id,
                 )
                 old_quantity = int(position["quantity"]) if position else 0
                 old_cost = old_quantity * float(position["avg_price"]) if position else 0.0
@@ -315,10 +634,10 @@ class Database:
                 connection.execute(
                     """
                     INSERT INTO positions(
-                        code, name, quantity, avg_price, stop_loss, tier, thesis,
+                        user_id, code, name, quantity, avg_price, stop_loss, tier, thesis,
                         market, currency, fx_rate, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(code) DO UPDATE SET
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, code) DO UPDATE SET
                         name = excluded.name,
                         quantity = excluded.quantity,
                         avg_price = excluded.avg_price,
@@ -331,6 +650,7 @@ class Database:
                         updated_at = excluded.updated_at
                     """,
                     (
+                        user_id,
                         code,
                         name,
                         new_quantity,
@@ -339,7 +659,9 @@ class Database:
                         int(values.get("tier") or (position and position.get("tier")) or 1),
                         thesis,
                         values.get("market", position.get("market") if position else "A"),
-                        values.get("currency", position.get("currency") if position else "CNY"),
+                        values.get(
+                            "currency", position.get("currency") if position else "CNY"
+                        ),
                         fx_rate,
                         position["created_at"] if position else now,
                         now,
@@ -356,23 +678,30 @@ class Database:
                 remaining = int(position["quantity"]) - quantity
                 if remaining:
                     connection.execute(
-                        "UPDATE positions SET quantity = ?, updated_at = ? WHERE code = ?",
-                        (remaining, now, code),
+                        """
+                        UPDATE positions SET quantity = ?, updated_at = ?
+                        WHERE user_id = ? AND code = ?
+                        """,
+                        (remaining, now, user_id, code),
                     )
                 else:
-                    connection.execute("DELETE FROM positions WHERE code = ?", (code,))
+                    connection.execute(
+                        "DELETE FROM positions WHERE user_id = ? AND code = ?",
+                        (user_id, code),
+                    )
             else:
                 raise ValueError("side must be buy or sell")
 
             cursor = connection.execute(
                 """
                 INSERT INTO trades(
-                    code, name, side, quantity, price, amount, logic,
+                    user_id, code, name, side, quantity, price, amount, logic,
                     funds_confirmed, space_confirmed, stop_loss, realized_pnl,
                     violated, note, market, currency, fx_rate, traded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    user_id,
                     code,
                     str(values.get("name") or (position and position["name"]) or code),
                     side,
@@ -387,7 +716,9 @@ class Database:
                     0,
                     str(values.get("note") or ""),
                     values.get("market", position.get("market") if position else "A"),
-                    values.get("currency", position.get("currency") if position else "CNY"),
+                    values.get(
+                        "currency", position.get("currency") if position else "CNY"
+                    ),
                     fx_rate,
                     now,
                 ),
@@ -406,6 +737,7 @@ class Database:
         total_capital: float,
         max_ratio: float,
         max_invested_ratio: float,
+        user_id: int,
     ) -> None:
         if not str(values.get("logic") or "").strip():
             raise ValueError("buy requires a written investment logic")
@@ -421,12 +753,20 @@ class Database:
 
         invested = float(
             connection.execute(
-                "SELECT COALESCE(SUM(quantity * avg_price * fx_rate), 0) FROM positions"
+                """
+                SELECT COALESCE(SUM(quantity * avg_price * fx_rate), 0)
+                FROM positions WHERE user_id = ?
+                """,
+                (user_id,),
             ).fetchone()[0]
         )
         realized = float(
             connection.execute(
-                "SELECT COALESCE(SUM(realized_pnl), 0) FROM trades WHERE side = 'sell'"
+                """
+                SELECT COALESCE(SUM(realized_pnl), 0)
+                FROM trades WHERE user_id = ? AND side = 'sell'
+                """,
+                (user_id,),
             ).fetchone()[0]
         )
         available = total_capital + realized - invested
@@ -448,30 +788,44 @@ class Database:
                 f"position would exceed the {max_ratio:.0%} single-stock limit"
             )
 
-    def list_journals(self, limit: int = 200) -> list[dict[str, Any]]:
+    # --- journal ----------------------------------------------------------
+
+    def list_journals(
+        self, limit: int = 200, user_id: int = LOCAL_USER_ID
+    ) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM journal ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+                """
+                SELECT * FROM journal WHERE user_id = ?
+                ORDER BY created_at DESC, id DESC LIMIT ?
+                """,
+                (user_id, limit),
             ).fetchall()
         return [self._normalize_journal(dict(row)) for row in rows]
 
-    def get_journal(self, journal_id: int) -> dict[str, Any] | None:
+    def get_journal(
+        self, journal_id: int, user_id: int = LOCAL_USER_ID
+    ) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM journal WHERE id = ?", (journal_id,)
+                "SELECT * FROM journal WHERE id = ? AND user_id = ?",
+                (journal_id, user_id),
             ).fetchone()
         return self._normalize_journal(dict(row)) if row else None
 
-    def create_journal(self, values: Mapping[str, Any]) -> dict[str, Any]:
+    def create_journal(
+        self, values: Mapping[str, Any], user_id: int = LOCAL_USER_ID
+    ) -> dict[str, Any]:
         now = utc_now()
         with self.transaction() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO journal(
-                    title, content, mood, tags, trade_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    user_id, title, content, mood, tags, trade_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    user_id,
                     values["title"],
                     values["content"],
                     values.get("mood", ""),
@@ -482,33 +836,266 @@ class Database:
                 ),
             )
             journal_id = int(cursor.lastrowid)
-        return self.get_journal(journal_id) or {}
+        return self.get_journal(journal_id, user_id) or {}
 
     def update_journal(
-        self, journal_id: int, values: Mapping[str, Any]
+        self,
+        journal_id: int,
+        values: Mapping[str, Any],
+        user_id: int = LOCAL_USER_ID,
     ) -> dict[str, Any] | None:
         allowed = {"title", "content", "mood", "tags", "trade_id"}
         updates = {key: value for key, value in values.items() if key in allowed}
         if "tags" in updates:
             updates["tags"] = json.dumps(updates["tags"], ensure_ascii=False)
         if not updates:
-            return self.get_journal(journal_id)
+            return self.get_journal(journal_id, user_id)
         clauses = [f"{key} = ?" for key in updates]
         params = list(updates.values())
         clauses.append("updated_at = ?")
-        params.extend([utc_now(), journal_id])
+        params.extend([utc_now(), journal_id, user_id])
         with self.transaction() as connection:
             cursor = connection.execute(
-                f"UPDATE journal SET {', '.join(clauses)} WHERE id = ?", params
+                f"UPDATE journal SET {', '.join(clauses)} WHERE id = ? AND user_id = ?",
+                params,
             )
             if cursor.rowcount == 0:
                 return None
-        return self.get_journal(journal_id)
+        return self.get_journal(journal_id, user_id)
 
-    def delete_journal(self, journal_id: int) -> bool:
+    def delete_journal(self, journal_id: int, user_id: int = LOCAL_USER_ID) -> bool:
         with self.transaction() as connection:
-            cursor = connection.execute("DELETE FROM journal WHERE id = ?", (journal_id,))
+            cursor = connection.execute(
+                "DELETE FROM journal WHERE id = ? AND user_id = ?",
+                (journal_id, user_id),
+            )
             return cursor.rowcount > 0
+
+    # --- credits / orders -------------------------------------------------
+
+    def get_credit_balance(self, user_id: int) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT balance, updated_at FROM credit_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if not row:
+            return {"balance": 0, "updated_at": utc_now()}
+        return {"balance": int(row["balance"]), "updated_at": row["updated_at"]}
+
+    def list_credit_ledger(
+        self, user_id: int, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM credit_ledger WHERE user_id = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reserve_credits(
+        self,
+        user_id: int,
+        amount: int,
+        *,
+        reason: str,
+        ref_type: str,
+        ref_id: str,
+    ) -> dict[str, Any]:
+        """Atomically debit credits with idempotent ref key. Raises ValueError if short."""
+        if amount <= 0:
+            raise ValueError("debit amount must be positive")
+        now = utc_now()
+        with self.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM credit_ledger
+                WHERE user_id = ? AND ref_type = ? AND ref_id = ?
+                """,
+                (user_id, ref_type, ref_id),
+            ).fetchone()
+            if existing:
+                return dict(existing)
+            account = connection.execute(
+                "SELECT balance FROM credit_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            balance = int(account["balance"]) if account else 0
+            if balance < amount:
+                raise ValueError("insufficient credits")
+            new_balance = balance - amount
+            connection.execute(
+                """
+                INSERT INTO credit_accounts(user_id, balance, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    balance = excluded.balance,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, new_balance, now),
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO credit_ledger(
+                    user_id, delta, balance_after, reason, ref_type, ref_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, -amount, new_balance, reason, ref_type, ref_id, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM credit_ledger WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return dict(row)
+
+    def refund_credits(
+        self,
+        user_id: int,
+        amount: int,
+        *,
+        reason: str,
+        ref_type: str,
+        ref_id: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM credit_ledger
+                WHERE user_id = ? AND ref_type = ? AND ref_id = ?
+                """,
+                (user_id, ref_type, ref_id),
+            ).fetchone()
+            if existing:
+                return dict(existing)
+            account = connection.execute(
+                "SELECT balance FROM credit_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            balance = int(account["balance"]) if account else 0
+            new_balance = balance + amount
+            connection.execute(
+                """
+                INSERT INTO credit_accounts(user_id, balance, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    balance = excluded.balance,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, new_balance, now),
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO credit_ledger(
+                    user_id, delta, balance_after, reason, ref_type, ref_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, amount, new_balance, reason, ref_type, ref_id, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM credit_ledger WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return dict(row)
+
+    def create_order(
+        self,
+        *,
+        user_id: int,
+        sku: str,
+        title: str,
+        credits: int,
+        amount_fen: int,
+        provider: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        order_id = uuid.uuid4().hex
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO orders(
+                    id, user_id, sku, title, credits, amount_fen, status, provider,
+                    provider_ref, created_at, updated_at, paid_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, '', ?, ?, NULL)
+                """,
+                (
+                    order_id,
+                    user_id,
+                    sku,
+                    title,
+                    credits,
+                    amount_fen,
+                    provider,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_order(order_id) or {}
+
+    def get_order(self, order_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM orders WHERE id = ?", (order_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def mark_order_paid(
+        self, order_id: str, *, provider_ref: str
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as connection:
+            order = connection.execute(
+                "SELECT * FROM orders WHERE id = ?", (order_id,)
+            ).fetchone()
+            if order is None:
+                raise ValueError("order not found")
+            if order["status"] == "paid":
+                return dict(order)
+            connection.execute(
+                """
+                UPDATE orders SET status = 'paid', provider_ref = ?, updated_at = ?, paid_at = ?
+                WHERE id = ?
+                """,
+                (provider_ref, now, now, order_id),
+            )
+            user_id = int(order["user_id"])
+            credits = int(order["credits"])
+            account = connection.execute(
+                "SELECT balance FROM credit_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            balance = int(account["balance"]) if account else 0
+            new_balance = balance + credits
+            connection.execute(
+                """
+                INSERT INTO credit_accounts(user_id, balance, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    balance = excluded.balance,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, new_balance, now),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO credit_ledger(
+                    user_id, delta, balance_after, reason, ref_type, ref_id, created_at
+                ) VALUES (?, ?, ?, ?, 'order', ?, ?)
+                """,
+                (
+                    user_id,
+                    credits,
+                    new_balance,
+                    f"充值 {order['title']}",
+                    order_id,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM orders WHERE id = ?", (order_id,)
+            ).fetchone()
+        return dict(row)
 
     @staticmethod
     def _normalize_trade(row: dict[str, Any]) -> dict[str, Any]:

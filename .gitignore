@@ -10,3 +10,5 @@ frontend/dist/
 frontend/.vite/
 artifacts/
 .DS_Store
+miniprogram/node_modules/
+miniprogram/dist/
