@@ -249,6 +249,17 @@ def preferred_stock_analysis(
     }
 
 
+def all_preferred_checks_passed(analysis: Mapping[str, Any]) -> bool:
+    """True only when every machine check explicitly passed (no manual/failed)."""
+    checks = analysis.get("checks") or []
+    if not checks:
+        return False
+    return all(
+        isinstance(check, Mapping) and check.get("status") == "passed"
+        for check in checks
+    )
+
+
 def market_structure_analysis(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:

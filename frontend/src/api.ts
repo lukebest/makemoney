@@ -2,6 +2,7 @@ import type {
   AIResult,
   AIStatus,
   AITradeReviewInput,
+  CloseScreenData,
   MarketMainline,
   MarketOverview,
   PortfolioSummary,
@@ -226,7 +227,7 @@ function normalizePreferred(value: unknown): PreferredStocksData {
       code: stringFrom(item.code),
       name: stringFrom(item.name),
       price: numberFrom(item.price),
-      change: numberFrom(item.change_pct),
+      change: numberFrom(item.change_pct ?? item.change),
       amount: numberFrom(item.amount),
       score: numberFrom(item.score),
       setup: stringFrom(item.setup, '条件不足'),
@@ -247,6 +248,18 @@ function normalizePreferred(value: unknown): PreferredStocksData {
     analyzedCount: numberFrom(raw.analyzed_count),
     activeSectors: listFrom<string>(raw.active_sectors, []),
     updatedAt: stringFrom(raw.updated_at),
+  }
+}
+
+function normalizeCloseScreen(value: unknown): CloseScreenData {
+  const raw = objectFrom(value)
+  const base = normalizePreferred(raw)
+  return {
+    ...base,
+    matchCount: numberFrom(raw.match_count, base.items.length),
+    asOfDate: stringFrom(raw.as_of_date) || undefined,
+    forDate: stringFrom(raw.for_date) || undefined,
+    afterClose: raw.after_close == null ? undefined : Boolean(raw.after_close),
   }
 }
 
@@ -353,6 +366,17 @@ export const api = {
     normalizeAIResult(await request<unknown>('/ai/review-report', { method: 'POST' })),
   preferred: async (limit = 8) =>
     normalizePreferred(await request<unknown>(`/market/preferred?limit=${limit}&candidates=${Math.max(limit, 12)}`)),
+  closeScreen: async () =>
+    normalizeCloseScreen(await request<unknown>('/market/preferred/close-screen')),
+  runCloseScreen: async (candidates = 60, force = false) => {
+    const params = new URLSearchParams({
+      candidates: String(candidates),
+      ...(force ? { force: 'true' } : {}),
+    })
+    return normalizeCloseScreen(
+      await request<unknown>(`/market/preferred/close-screen?${params}`, { method: 'POST' }),
+    )
+  },
   stock: async (code: string) => normalizeStock(await request<unknown>(`/stocks/${encodeURIComponent(code)}`)),
   async settings(): Promise<Settings> {
     const raw = objectFrom(await request<unknown>('/settings'))

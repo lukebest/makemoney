@@ -108,6 +108,15 @@ class Database:
                     ON trades(code, traded_at);
                 CREATE INDEX IF NOT EXISTS idx_journal_created
                     ON journal(created_at);
+
+                CREATE TABLE IF NOT EXISTS close_screens (
+                    as_of_date TEXT PRIMARY KEY,
+                    for_date TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_close_screens_for_date
+                    ON close_screens(for_date);
                 """
             )
             position_columns = {
@@ -509,6 +518,63 @@ class Database:
         with self.transaction() as connection:
             cursor = connection.execute("DELETE FROM journal WHERE id = ?", (journal_id,))
             return cursor.rowcount > 0
+
+    def save_close_screen(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        as_of_date = str(payload["as_of_date"])
+        for_date = str(payload["for_date"])
+        now = utc_now()
+        body = json.dumps(payload, ensure_ascii=False)
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO close_screens(as_of_date, for_date, payload, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(as_of_date) DO UPDATE SET
+                    for_date = excluded.for_date,
+                    payload = excluded.payload,
+                    created_at = excluded.created_at
+                """,
+                (as_of_date, for_date, body, now),
+            )
+        return self.get_close_screen(as_of_date=as_of_date) or dict(payload)
+
+    def get_close_screen(
+        self,
+        *,
+        as_of_date: str | None = None,
+        for_date: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            if as_of_date:
+                row = connection.execute(
+                    "SELECT payload FROM close_screens WHERE as_of_date = ?",
+                    (as_of_date,),
+                ).fetchone()
+            elif for_date:
+                row = connection.execute(
+                    """
+                    SELECT payload FROM close_screens
+                    WHERE for_date = ?
+                    ORDER BY as_of_date DESC
+                    LIMIT 1
+                    """,
+                    (for_date,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT payload FROM close_screens
+                    ORDER BY as_of_date DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
 
     @staticmethod
     def _normalize_trade(row: dict[str, Any]) -> dict[str, Any]:

@@ -51,6 +51,35 @@ class DummyMarket:
             "analyzed_count": candidates,
         }
 
+    def close_screen(self, candidates):
+        return {
+            "items": [
+                {
+                    "code": "600519",
+                    "name": "贵州茅台",
+                    "score": 100,
+                    "setup": "重点观察",
+                    "change_pct": 3.2,
+                    "amount": 1e9,
+                    "checks": [
+                        {"key": "volume_pile", "label": "主力入场有量", "status": "passed", "detail": ""},
+                        {"key": "controlled_washout", "label": "洗盘短而可控", "status": "passed", "detail": ""},
+                        {"key": "price_volume_shift", "label": "洗盘后价量重心上移", "status": "passed", "detail": ""},
+                        {"key": "startup_signal", "label": "强势启动信号", "status": "passed", "detail": ""},
+                        {"key": "active_sector", "label": "处在活跃板块", "status": "passed", "detail": ""},
+                    ],
+                }
+            ],
+            "source": "akshare",
+            "analyzed_count": candidates,
+            "match_count": 1,
+            "active_sectors": ["医疗器械"],
+            "as_of_date": "2026-07-16",
+            "for_date": "2026-07-17",
+            "after_close": True,
+            "updated_at": "2026-07-16T15:05:00+00:00",
+        }
+
     def mainline(self):
         return {
             "source": "test",
@@ -121,6 +150,16 @@ def test_health_settings_and_cors(tmp_path):
         assert preferred.json()["items"][0]["score"] == 75
         assert preferred.json()["analyzed_count"] == 3
         assert client.get("/api/market/mainline").json()["main_sector"] == "医疗器械"
+        empty = client.get("/api/market/preferred/close-screen")
+        assert empty.status_code == 200
+        assert empty.json()["items"] == []
+        screened = client.post("/api/market/preferred/close-screen?force=true&candidates=20")
+        assert screened.status_code == 200
+        assert screened.json()["match_count"] == 1
+        assert screened.json()["for_date"] == "2026-07-17"
+        saved = client.get("/api/market/preferred/close-screen?for_date=2026-07-17")
+        assert saved.status_code == 200
+        assert saved.json()["items"][0]["code"] == "600519"
 
 
 def test_hong_kong_connect_buy_allows_non_a_share_lot(tmp_path):

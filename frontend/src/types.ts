@@ -160,6 +160,13 @@ export interface PreferredStocksData {
   updatedAt?: string
 }
 
+export interface CloseScreenData extends PreferredStocksData {
+  matchCount: number
+  asOfDate?: string
+  forDate?: string
+  afterClose?: boolean
+}
+
 export interface Settings {
   totalCapital: number
   maxPositionRatio?: number

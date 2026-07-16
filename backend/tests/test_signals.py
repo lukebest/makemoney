@@ -1,4 +1,5 @@
 from backend.signals import (
+    all_preferred_checks_passed,
     classify_market_phase,
     enrich_klines,
     moving_average,
@@ -104,6 +105,9 @@ def test_preferred_stock_scores_active_sector_automatically():
     assert active["checks"][-1]["status"] == "passed"
     assert inactive["score"] == 80
     assert inactive["checks"][-1]["status"] == "failed"
+    assert all_preferred_checks_passed(active) is True
+    assert all_preferred_checks_passed(inactive) is False
+    assert all_preferred_checks_passed(preferred_stock_analysis(enriched)) is False
 
 
 def test_preferred_stock_analysis_rejects_short_history():

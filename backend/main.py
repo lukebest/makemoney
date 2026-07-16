@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .ai import AIService
 from .db import Database
-from .market import MarketService, is_hk_code, normalize_code
+from .market import MarketService, is_after_a_share_close, is_hk_code, normalize_code
 from .signals import review_statistics, stop_loss_status
 
 
@@ -151,6 +151,45 @@ def create_app(
         candidates: int = Query(default=12, ge=1, le=30),
     ) -> dict[str, Any]:
         return _market(request).preferred_stocks(limit, max(limit, candidates))
+
+    @application.get("/api/market/preferred/close-screen", tags=["market"])
+    def get_close_screen(
+        request: Request,
+        for_date: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        saved = _db(request).get_close_screen(for_date=for_date)
+        if saved is None:
+            return {
+                "items": [],
+                "match_count": 0,
+                "analyzed_count": 0,
+                "source": "empty",
+                "as_of_date": None,
+                "for_date": for_date,
+                "updated_at": None,
+            }
+        return saved
+
+    @application.post("/api/market/preferred/close-screen", tags=["market"])
+    def run_close_screen(
+        request: Request,
+        candidates: int = Query(default=60, ge=10, le=100),
+        force: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        if not force and not is_after_a_share_close():
+            raise HTTPException(
+                status_code=409,
+                detail="收盘筛选仅在 A 股收盘后（15:00 起）可用；调试可加 force=true",
+            )
+        result = _market(request).close_screen(candidates)
+        if result.get("source") == "sample":
+            raise HTTPException(
+                status_code=503,
+                detail="实时行情暂不可用，无法生成收盘精选",
+            )
+        if not result.get("as_of_date") or not result.get("for_date"):
+            raise HTTPException(status_code=503, detail="无法确定交易日")
+        return _db(request).save_close_screen(result)
 
     @application.get("/api/stocks/{code}", tags=["market"])
     @application.get("/api/market/stocks/{code}/daily", tags=["market"])

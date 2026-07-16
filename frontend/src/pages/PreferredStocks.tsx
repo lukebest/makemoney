@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { Button, PageHeader, Panel, StatusView, percent } from '../components/ui'
-import type { PreferredStocksData } from '../types'
+import type { CloseScreenData, PreferredStock, PreferredStocksData } from '../types'
 
 const amount = (value: number) => {
   if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1)} 亿`
@@ -10,20 +10,80 @@ const amount = (value: number) => {
   return value.toFixed(0)
 }
 
+function StockCards({ stocks, label }: { stocks: PreferredStock[]; label: string }) {
+  if (!stocks.length) {
+    return <StatusView state="empty" message="当前没有通过数据验证的候选，请稍后再试" />
+  }
+  return (
+    <section className="preferred-list" aria-label={label}>
+      {stocks.map((stock, index) => (
+        <article className="preferred-card" key={stock.code}>
+          <div className="preferred-rank"><span>RANK</span><strong>{String(index + 1).padStart(2, '0')}</strong></div>
+          <div className="preferred-identity">
+            <small>{stock.code}</small>
+            <h2>{stock.name}</h2>
+            {stock.sector && <small className={stock.inMainline ? 'sector-tag active' : 'sector-tag'}>{stock.sector}{stock.inMainline ? ' · 主线' : ''}</small>}
+            <div>
+              <b>{stock.price.toFixed(2)}</b>
+              <em className={stock.change >= 0 ? 'gain' : 'loss'}>{percent(stock.change)}</em>
+              <span>成交额 {amount(stock.amount)}</span>
+            </div>
+          </div>
+          <div className="preferred-score">
+            <strong>{stock.score}</strong><span>/ 100</span>
+            <small className={`setup-${stock.setup === '重点观察' ? 'focus' : stock.setup === '继续跟踪' ? 'watch' : 'weak'}`}>{stock.setup}</small>
+          </div>
+          <ul className="preferred-checks">
+            {stock.checks.map((check) => (
+              <li key={check.key} className={check.status}>
+                <span>{check.status === 'passed' ? '✓' : check.status === 'manual' ? '?' : '×'}</span>
+                <div><b>{check.label}</b><small>{check.detail}</small></div>
+              </li>
+            ))}
+          </ul>
+          <div className="preferred-foot">
+            <p><span>洗盘周期</span><b>{stock.washoutDays ?? '—'} 日</b></p>
+            <p><span>最大回撤</span><b>{stock.pullbackPct != null ? `${stock.pullbackPct.toFixed(1)}%` : '—'}</b></p>
+            <p><span>启动低点止损参考</span><b>{stock.stopLoss?.toFixed(2) ?? '—'}</b></p>
+            <Link className="button button-ghost" to={`/stock?code=${stock.code}`}>打开个股诊断</Link>
+          </div>
+        </article>
+      ))}
+    </section>
+  )
+}
+
 export function PreferredStocks() {
   const [data, setData] = useState<PreferredStocksData>()
+  const [closeScreen, setCloseScreen] = useState<CloseScreenData>()
   const [loading, setLoading] = useState(true)
+  const [scanning, setScanning] = useState(false)
   const [error, setError] = useState('')
+  const [scanError, setScanError] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      setData(await api.preferred())
+      const [preferred, saved] = await Promise.all([api.preferred(), api.closeScreen()])
+      setData(preferred)
+      setCloseScreen(saved)
     } catch (reason) {
       setError(errorMessage(reason))
     } finally {
       setLoading(false)
+    }
+  }, [])
+
+  const runCloseScreen = useCallback(async () => {
+    setScanning(true)
+    setScanError('')
+    try {
+      setCloseScreen(await api.runCloseScreen(60))
+    } catch (reason) {
+      setScanError(errorMessage(reason))
+    } finally {
+      setScanning(false)
     }
   }, [])
 
@@ -52,12 +112,49 @@ export function PreferredStocks() {
           <li><b>04</b><span>强势启动信号</span></li>
           <li><b>05</b><span>处在活跃板块</span></li>
         </ol>
-        <p>行业首板广度排名前三的热点板块自动进入评分；涨停池不可用时该项不计分。</p>
+        <p>行业首板广度排名前三的热点板块自动进入评分；涨停池不可用时该项不计分。收盘后可跑「五项全过」精选，供次日开盘前决策。</p>
+      </Panel>
+
+      <Panel className="close-screen-panel">
+        <div className="close-screen-head">
+          <div>
+            <span>收盘精选 · 五项全过</span>
+            <strong>供次日观察，不自动下单</strong>
+            <p>
+              {closeScreen?.asOfDate && closeScreen?.forDate
+                ? `基于 ${closeScreen.asOfDate} 收盘，面向 ${closeScreen.forDate} 交易日`
+                : '尚未生成收盘精选；建议在 15:00 后运行'}
+            </p>
+          </div>
+          <Button onClick={() => void runCloseScreen()} disabled={scanning}>
+            {scanning ? '收盘筛选中…' : '运行收盘筛选'}
+          </Button>
+        </div>
+        {scanError && <StatusView state="error" message={scanError} onRetry={() => void runCloseScreen()} />}
+        {!scanError && closeScreen && (
+          <div className="screen-summary close-screen-summary">
+            <div><span>分析样本</span><strong>{closeScreen.analyzedCount}</strong><small>只 / 预筛候选</small></div>
+            <div><span>五项全过</span><strong>{closeScreen.matchCount}</strong><small>只 / 次日观察</small></div>
+            <div><span>门槛</span><strong>5 / 5</strong><small>项全部通过</small></div>
+            <time>{closeScreen.updatedAt ? `保存于 ${new Date(closeScreen.updatedAt).toLocaleString('zh-CN')}` : '尚未保存'}</time>
+          </div>
+        )}
+        {!scanError && closeScreen && (
+          closeScreen.items.length
+            ? <StockCards stocks={closeScreen.items} label="收盘精选五项全过" />
+            : <StatusView state="empty" message="最近一次收盘筛选没有五项全过的标的" />
+        )}
       </Panel>
 
       {loading ? <StatusView state="loading" message="正在预筛候选并逐只验证 K 线，首次加载可能需要十余秒" /> :
         error ? <StatusView state="error" message={error} onRetry={() => void load()} /> : data && (
           <>
+            <div className="screen-summary">
+              <div><span>盘中观察</span><strong>{data.analyzedCount}</strong><small>只 / 预筛候选</small></div>
+              <div><span>进入清单</span><strong>{data.items.length}</strong><small>只 / 按分数排序</small></div>
+              <div><span>评分口径</span><strong>5 × 20</strong><small>分 / 机器规则</small></div>
+              <time>{data.updatedAt ? `更新于 ${new Date(data.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '实时计算'}</time>
+            </div>
             {data.source === 'sample' && (
               <div className="source-notice" role="status">
                 <strong>停止筛选</strong>
@@ -70,50 +167,7 @@ export function PreferredStocks() {
                 <span>少量候选历史行情不可用，已自动排除，不影响下列已验证结果。</span>
               </div>
             )}
-            <div className="screen-summary">
-              <div><span>分析样本</span><strong>{data.analyzedCount}</strong><small>只 / 预筛候选</small></div>
-              <div><span>进入清单</span><strong>{data.items.length}</strong><small>只 / 按分数排序</small></div>
-              <div><span>评分口径</span><strong>5 × 20</strong><small>分 / 机器规则</small></div>
-              <time>{data.updatedAt ? `更新于 ${new Date(data.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '实时计算'}</time>
-            </div>
-
-            {!data.items.length ? <StatusView state="empty" message="当前没有通过数据验证的候选，请稍后再试" /> : (
-              <section className="preferred-list" aria-label="优选个股观察清单">
-                {data.items.map((stock, index) => (
-                  <article className="preferred-card" key={stock.code}>
-                    <div className="preferred-rank"><span>RANK</span><strong>{String(index + 1).padStart(2, '0')}</strong></div>
-                    <div className="preferred-identity">
-                      <small>{stock.code}</small>
-                      <h2>{stock.name}</h2>
-                      {stock.sector && <small className={stock.inMainline ? 'sector-tag active' : 'sector-tag'}>{stock.sector}{stock.inMainline ? ' · 主线' : ''}</small>}
-                      <div>
-                        <b>{stock.price.toFixed(2)}</b>
-                        <em className={stock.change >= 0 ? 'gain' : 'loss'}>{percent(stock.change)}</em>
-                        <span>成交额 {amount(stock.amount)}</span>
-                      </div>
-                    </div>
-                    <div className="preferred-score">
-                      <strong>{stock.score}</strong><span>/ 100</span>
-                      <small className={`setup-${stock.setup === '重点观察' ? 'focus' : stock.setup === '继续跟踪' ? 'watch' : 'weak'}`}>{stock.setup}</small>
-                    </div>
-                    <ul className="preferred-checks">
-                      {stock.checks.map((check) => (
-                        <li key={check.key} className={check.status}>
-                          <span>{check.status === 'passed' ? '✓' : check.status === 'manual' ? '?' : '×'}</span>
-                          <div><b>{check.label}</b><small>{check.detail}</small></div>
-                        </li>
-                      ))}
-                    </ul>
-                    <div className="preferred-foot">
-                      <p><span>洗盘周期</span><b>{stock.washoutDays ?? '—'} 日</b></p>
-                      <p><span>最大回撤</span><b>{stock.pullbackPct != null ? `${stock.pullbackPct.toFixed(1)}%` : '—'}</b></p>
-                      <p><span>启动低点止损参考</span><b>{stock.stopLoss?.toFixed(2) ?? '—'}</b></p>
-                      <Link className="button button-ghost" to={`/stock?code=${stock.code}`}>打开个股诊断</Link>
-                    </div>
-                  </article>
-                ))}
-              </section>
-            )}
+            <StockCards stocks={data.items} label="优选个股观察清单" />
           </>
         )}
     </div>

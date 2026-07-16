@@ -10,9 +10,11 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from .chan import latest_structure
 from .signals import (
+    all_preferred_checks_passed,
     classify_market_phase,
     enrich_klines,
     market_structure_analysis,
@@ -21,6 +23,8 @@ from .signals import (
     support_resistance,
     trend_label,
 )
+
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 
 INDEXES = {
@@ -106,6 +110,46 @@ class MarketService:
             lambda: self._load_preferred_stocks(limit, candidate_count),
         )
 
+    def close_screen(self, candidate_count: int = 60) -> dict[str, Any]:
+        """After-close scan: keep only stocks that pass all five preferred checks."""
+        candidate_count = max(10, min(candidate_count, 100))
+        scanned = self._scan_preferred_candidates(candidate_count)
+        if scanned["source"] == "sample":
+            return {
+                **scanned,
+                "items": [],
+                "match_count": 0,
+                "as_of_date": None,
+                "for_date": None,
+                "after_close": is_after_a_share_close(),
+            }
+
+        matches = [
+            item for item in scanned["items"] if all_preferred_checks_passed(item)
+        ]
+        matches.sort(
+            key=lambda item: (
+                float(item["score"]),
+                float(item["change_pct"]),
+                float(item["amount"]),
+            ),
+            reverse=True,
+        )
+        as_of = scanned.get("board_date") or china_today().isoformat()
+        as_of_date = date.fromisoformat(str(as_of)[:10])
+        return {
+            "items": matches,
+            "source": scanned["source"],
+            "fallback_reason": scanned.get("fallback_reason"),
+            "analyzed_count": scanned["analyzed_count"],
+            "match_count": len(matches),
+            "active_sectors": scanned.get("active_sectors") or [],
+            "as_of_date": as_of_date.isoformat(),
+            "for_date": next_session_date(as_of_date).isoformat(),
+            "after_close": is_after_a_share_close(),
+            "updated_at": _now(),
+        }
+
     def mainline(self) -> dict[str, Any]:
         """Return today's hot sectors and consecutive-board leader ladder."""
         return self.cache.get_or_load(
@@ -115,6 +159,25 @@ class MarketService:
     def _load_preferred_stocks(
         self, limit: int, candidate_count: int
     ) -> dict[str, Any]:
+        scanned = self._scan_preferred_candidates(candidate_count)
+        if scanned["source"] == "sample":
+            return {
+                "items": [],
+                "source": "sample",
+                "fallback_reason": scanned.get("fallback_reason"),
+                "analyzed_count": 0,
+                "updated_at": _now(),
+            }
+        return {
+            "items": scanned["items"][:limit],
+            "source": scanned["source"],
+            "fallback_reason": scanned.get("fallback_reason"),
+            "analyzed_count": scanned["analyzed_count"],
+            "active_sectors": scanned.get("active_sectors") or [],
+            "updated_at": _now(),
+        }
+
+    def _scan_preferred_candidates(self, candidate_count: int) -> dict[str, Any]:
         spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
         if spot["source"] == "sample":
             return {
@@ -122,7 +185,8 @@ class MarketService:
                 "source": "sample",
                 "fallback_reason": spot.get("fallback_reason"),
                 "analyzed_count": 0,
-                "updated_at": _now(),
+                "active_sectors": [],
+                "board_date": None,
             }
 
         mainline = self.mainline()
@@ -142,7 +206,9 @@ class MarketService:
         for quote in candidates:
             daily = self.stock_daily(quote["code"], 120)
             if daily["source"] != "akshare":
-                failures.append(f"{quote['code']}: {daily.get('fallback_reason', 'unavailable')}")
+                failures.append(
+                    f"{quote['code']}: {daily.get('fallback_reason', 'unavailable')}"
+                )
                 continue
             sector = sector_map.get(quote["code"])
             analysis = preferred_stock_analysis(
@@ -170,12 +236,12 @@ class MarketService:
             reverse=True,
         )
         return {
-            "items": results[:limit],
+            "items": results,
             "source": "akshare",
             "fallback_reason": "; ".join(failures)[:240] or None,
             "analyzed_count": len(candidates),
             "active_sectors": active_sectors or [],
-            "updated_at": _now(),
+            "board_date": mainline.get("date"),
         }
 
     @staticmethod
@@ -887,6 +953,26 @@ class MarketService:
             )
             previous = close
         return rows
+
+
+def china_today() -> date:
+    return datetime.now(CHINA_TZ).date()
+
+
+def is_after_a_share_close(now: datetime | None = None) -> bool:
+    """True after 15:00 Asia/Shanghai on weekdays, or any time on weekends."""
+    current = now.astimezone(CHINA_TZ) if now else datetime.now(CHINA_TZ)
+    if current.weekday() >= 5:
+        return True
+    return (current.hour, current.minute) >= (15, 0)
+
+
+def next_session_date(as_of: date) -> date:
+    """Next weekday after as_of (ignores statutory holidays)."""
+    nxt = as_of + timedelta(days=1)
+    while nxt.weekday() >= 5:
+        nxt += timedelta(days=1)
+    return nxt
 
 
 def normalize_code(value: Any) -> str:

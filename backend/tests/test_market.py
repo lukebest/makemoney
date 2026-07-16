@@ -1,4 +1,22 @@
-from backend.market import MarketService, normalize_code, to_sina_symbol
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+from backend.market import (
+    MarketService,
+    is_after_a_share_close,
+    next_session_date,
+    normalize_code,
+    to_sina_symbol,
+)
+
+
+def test_close_session_helpers():
+    assert next_session_date(date(2026, 7, 16)) == date(2026, 7, 17)
+    assert next_session_date(date(2026, 7, 17)) == date(2026, 7, 20)
+    shanghai = ZoneInfo("Asia/Shanghai")
+    assert is_after_a_share_close(datetime(2026, 7, 16, 14, 59, tzinfo=shanghai)) is False
+    assert is_after_a_share_close(datetime(2026, 7, 16, 15, 0, tzinfo=shanghai)) is True
+    assert is_after_a_share_close(datetime(2026, 7, 18, 10, 0, tzinfo=shanghai)) is True
 
 
 def test_normalize_and_sina_symbol():

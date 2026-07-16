@@ -290,6 +290,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--brass); box-shad
 .screen-summary strong { color: var(--ivory); font: 25px var(--serif); }
 .screen-summary small { align-self: end; padding-bottom: 4px; color: #5d5952; font-size: 9px; }
 .screen-summary time { justify-self: end; padding-right: 22px; color: var(--muted); font-size: 9px; letter-spacing: .06em; }
+.close-screen-panel { display: grid; gap: 16px; }
+.close-screen-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.close-screen-head > div { display: grid; gap: 6px; }
+.close-screen-head span { color: var(--brass); font-size: 9px; letter-spacing: .16em; }
+.close-screen-head strong { font: 20px var(--serif); letter-spacing: .04em; }
+.close-screen-head p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.close-screen-summary { margin-top: 0; }
 .preferred-list { display: grid; gap: 12px; }
 .preferred-card { position: relative; display: grid; grid-template-columns: 66px minmax(190px, .75fr) 105px minmax(350px, 1.6fr); background: #10120f; border: 1px solid var(--line-soft); overflow: hidden; transition: border-color .25s, transform .25s; }
 .preferred-card:hover { border-color: rgba(178,151,91,.35); transform: translateY(-1px); }
