@@ -66,21 +66,27 @@ PYTHONPATH=. uvicorn backend.main:app --reload --host 127.0.0.1 --port "${BACKEN
 BACKEND_PID=$!
 
 # Wait until health responds (or backend exits).
+backend_ready=0
 for _ in $(seq 1 40); do
   if ! kill -0 "${BACKEND_PID}" 2>/dev/null; then
     echo "!! backend exited early"
     exit 1
   fi
   if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/health" >/dev/null 2>&1; then
+    backend_ready=1
     break
   fi
   sleep 0.25
 done
+if [[ "${backend_ready}" -ne 1 ]]; then
+  echo "!! backend health check timed out on port ${BACKEND_PORT}"
+  exit 1
+fi
 
 echo ">> starting frontend http://127.0.0.1:${FRONTEND_PORT}"
 (
   cd frontend
-  npm run dev -- --host 127.0.0.1 --port "${FRONTEND_PORT}"
+  BACKEND_PORT="${BACKEND_PORT}" npm run dev -- --host 127.0.0.1 --port "${FRONTEND_PORT}"
 ) &
 FRONTEND_PID=$!
 
