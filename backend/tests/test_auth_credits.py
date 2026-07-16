@@ -77,12 +77,14 @@ def test_credit_purchase_and_ai_debit_refund(tmp_path, monkeypatch):
         assert failed.status_code == 502
         assert client.get("/api/credits", headers=headers).json()["balance"] == 5
 
-        ok = client.post("/api/ai/interpret/600519?request_id=req-2", headers=headers)
+        # Same request_id after a refunded failure must charge again (not free AI).
+        ok = client.post("/api/ai/interpret/600519?request_id=req-1", headers=headers)
         assert ok.status_code == 200
         assert ok.json()["credits_charged"] == 1
         assert ok.json()["credits_balance"] == 4
 
-        again = client.post("/api/ai/interpret/600519?request_id=req-2", headers=headers)
+        # Successful same request_id stays idempotent.
+        again = client.post("/api/ai/interpret/600519?request_id=req-1", headers=headers)
         assert again.status_code == 200
         assert client.get("/api/credits", headers=headers).json()["balance"] == 4
 
@@ -132,3 +134,40 @@ def test_local_web_ai_skips_credits(tmp_path):
         response = client.post("/api/ai/interpret/600519")
         assert response.status_code == 200
         assert response.json()["credits_charged"] == 0
+
+
+def test_legacy_positions_migration_adds_columns_before_pk_rewrite(tmp_path):
+    """Old DBs lack market/currency/fx_rate; migration must not SELECT them first."""
+    import sqlite3
+
+    from backend.db import Database, LOCAL_USER_ID
+
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE positions (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            avg_price REAL NOT NULL,
+            stop_loss REAL NOT NULL,
+            thesis TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO positions(code, name, quantity, avg_price, stop_loss, thesis, created_at, updated_at)
+        VALUES ('600519', '贵州茅台', 100, 100, 95, '', '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    db = Database(path)
+    db.initialize()
+    rows = db.list_positions(LOCAL_USER_ID)
+    assert len(rows) == 1
+    assert rows[0]["code"] == "600519"
+    assert rows[0]["user_id"] == LOCAL_USER_ID
+    assert rows[0]["market"] == "A"
+    assert rows[0]["currency"] == "CNY"

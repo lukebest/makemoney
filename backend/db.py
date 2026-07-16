@@ -185,9 +185,10 @@ class Database:
             )
             self._ensure_local_user(connection)
             self._migrate_user_id_columns(connection)
+            # Legacy columns must exist before positions PK migration SELECTs them.
+            self._ensure_legacy_columns(connection)
             self._migrate_positions_pk(connection)
             self._migrate_settings_to_user(connection)
-            self._ensure_legacy_columns(connection)
             now = utc_now()
             defaults = {
                 "total_capital": 100000.0,
@@ -246,7 +247,7 @@ class Database:
             row["name"]
             for row in connection.execute("PRAGMA table_info(positions)").fetchall()
         }
-        if "user_id" in columns:
+        if not columns or "user_id" in columns:
             return
         connection.executescript(
             """
@@ -269,14 +270,20 @@ class Database:
             );
             """
         )
+        tier = "tier" if "tier" in columns else "1"
+        thesis = "thesis" if "thesis" in columns else "''"
+        market = "market" if "market" in columns else "'A'"
+        currency = "currency" if "currency" in columns else "'CNY'"
+        fx_rate = "fx_rate" if "fx_rate" in columns else "1"
         connection.execute(
             f"""
             INSERT INTO positions_v2(
                 user_id, code, name, quantity, avg_price, stop_loss, tier, thesis,
                 market, currency, fx_rate, created_at, updated_at
             )
-            SELECT {LOCAL_USER_ID}, code, name, quantity, avg_price, stop_loss, tier, thesis,
-                   market, currency, fx_rate, created_at, updated_at
+            SELECT {LOCAL_USER_ID}, code, name, quantity, avg_price, stop_loss,
+                   {tier}, {thesis}, {market}, {currency}, {fx_rate},
+                   created_at, updated_at
             FROM positions
             """
         )
@@ -905,7 +912,12 @@ class Database:
         ref_type: str,
         ref_id: str,
     ) -> dict[str, Any]:
-        """Atomically debit credits with idempotent ref key. Raises ValueError if short."""
+        """Atomically debit credits with idempotent ref key. Raises ValueError if short.
+
+        A prior debit for the same ref is only reused when it has not been reversed.
+        If a matching positive ledger row already restored the balance, the old
+        attempt is archived and a fresh debit is taken so retries are not free.
+        """
         if amount <= 0:
             raise ValueError("debit amount must be positive")
         now = utc_now()
@@ -918,7 +930,25 @@ class Database:
                 (user_id, ref_type, ref_id),
             ).fetchone()
             if existing:
-                return dict(existing)
+                reversal = connection.execute(
+                    """
+                    SELECT id FROM credit_ledger
+                    WHERE user_id = ? AND ref_id = ? AND ref_type != ?
+                      AND delta = ?
+                    """,
+                    (user_id, ref_id, ref_type, -int(existing["delta"])),
+                ).fetchone()
+                if not reversal:
+                    return dict(existing)
+                # Prior attempt was refunded — free the unique key and charge again.
+                archive_ref = f"{ref_id}#closed-{existing['id']}"
+                connection.execute(
+                    """
+                    UPDATE credit_ledger SET ref_id = ?
+                    WHERE user_id = ? AND ref_id = ?
+                    """,
+                    (archive_ref, user_id, ref_id),
+                )
             account = connection.execute(
                 "SELECT balance FROM credit_accounts WHERE user_id = ?",
                 (user_id,),
