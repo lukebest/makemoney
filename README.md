@@ -23,6 +23,18 @@
 
 ## 本地运行
 
+一键启动前后端（缺依赖会自动安装）：
+
+```bash
+./start.sh
+```
+
+- Web：<http://127.0.0.1:5173>
+- API 文档：<http://127.0.0.1:8000/docs>
+- `Ctrl+C` 会同时停掉两端
+
+也可手动分端启动：
+
 ### 1. 后端
 
 ```bash
@@ -31,8 +43,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
-
-接口文档位于 <http://localhost:8000/docs>。
 
 ### 2. 前端
 
@@ -44,7 +54,7 @@ npm install
 npm run dev
 ```
 
-打开 <http://localhost:5173>。开发服务器会将 `/api` 代理到后端。
+开发服务器会将 `/api` 代理到后端。
 
 ## 验证
 
