@@ -1,3 +1,227 @@
+/* Design tokens — mirrors the web app's dark, brass-accented theme. */
+$bg: #0c0d0b;
+$surface: #14150f;
+$surface-2: #1b1d15;
+$line: #2c2e22;
+$text: #eee7d6;
+$muted: #8d887c;
+$brass: #b2975b;
+$gain: #b93a32;
+$loss: #3d8b6d;
+
 page {
-  background-color: #f5f6f8;
+  background-color: $bg;
+  color: $text;
+  font-size: 28px;
+  line-height: 1.5;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif;
+}
+
+.page {
+  padding: 24px 24px 140px;
+  box-sizing: border-box;
+  min-height: 100vh;
+}
+
+/* Page header */
+.page-header {
+  margin-bottom: 24px;
+
+  &__eyebrow {
+    display: block;
+    font-size: 22px;
+    letter-spacing: 2px;
+    color: $brass;
+    text-transform: uppercase;
+  }
+
+  &__title {
+    display: block;
+    font-size: 44px;
+    font-weight: 600;
+    margin: 8px 0;
+    color: $text;
+  }
+
+  &__desc {
+    display: block;
+    font-size: 24px;
+    color: $muted;
+  }
+}
+
+/* Panel */
+.panel {
+  background-color: $surface;
+  border: 1px solid $line;
+  border-radius: 20px;
+  padding: 28px 24px;
+  margin-bottom: 24px;
+
+  &__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 20px;
+  }
+
+  &__kicker {
+    display: block;
+    font-size: 20px;
+    letter-spacing: 2px;
+    color: $brass;
+    text-transform: uppercase;
+  }
+
+  &__title {
+    display: block;
+    font-size: 32px;
+    font-weight: 600;
+    margin-top: 6px;
+  }
+}
+
+/* Metric */
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  &__label {
+    font-size: 22px;
+    color: $muted;
+  }
+
+  &__value {
+    font-size: 34px;
+    font-weight: 600;
+    color: $text;
+
+    &--gain { color: $gain; }
+    &--loss { color: $loss; }
+  }
+
+  &__note {
+    font-size: 20px;
+    color: $muted;
+  }
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+
+  .metric { flex: 1; }
+}
+
+/* Status view */
+.status-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 24px;
+  gap: 10px;
+
+  &__mark {
+    font-size: 48px;
+    color: $brass;
+  }
+
+  &__title {
+    font-size: 30px;
+    font-weight: 600;
+  }
+
+  &__hint {
+    font-size: 24px;
+    color: $muted;
+    text-align: center;
+  }
+
+  &__retry {
+    margin-top: 16px;
+    color: $brass;
+    background: transparent;
+    border: 1px solid $brass;
+  }
+}
+
+/* Shared bits */
+.gain { color: $gain; }
+.loss { color: $loss; }
+.brass { color: $brass; }
+.muted { color: $muted; }
+
+.source-notice {
+  background-color: rgba(185, 58, 50, 0.12);
+  border: 1px solid rgba(185, 58, 50, 0.4);
+  border-radius: 14px;
+  padding: 18px 20px;
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  &__title { font-weight: 600; color: $gain; font-size: 26px; }
+  &__text { font-size: 22px; color: $muted; }
+}
+
+.pill-btn {
+  background-color: $brass;
+  color: #17140c;
+  border-radius: 999px;
+  font-size: 26px;
+  font-weight: 600;
+  padding: 0 32px;
+
+  &--ghost {
+    background: transparent;
+    color: $brass;
+    border: 1px solid $brass;
+  }
+
+  &--danger {
+    background: transparent;
+    color: $gain;
+    border: 1px solid rgba(185, 58, 50, 0.6);
+  }
+
+  &[disabled] { opacity: 0.5; }
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+
+  &__label { font-size: 24px; color: $muted; }
+
+  &__input,
+  &__textarea {
+    background-color: $surface-2;
+    border: 1px solid $line;
+    border-radius: 12px;
+    padding: 16px 18px;
+    color: $text;
+    font-size: 28px;
+  }
+
+  &__hint { font-size: 20px; color: $muted; }
+}
+
+.tag {
+  display: inline-block;
+  font-size: 20px;
+  padding: 2px 12px;
+  border-radius: 999px;
+  border: 1px solid $line;
+  color: $muted;
+
+  &--active {
+    color: $brass;
+    border-color: $brass;
+  }
 }

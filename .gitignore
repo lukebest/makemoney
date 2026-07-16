@@ -12,3 +12,5 @@ artifacts/
 .DS_Store
 miniprogram/node_modules/
 miniprogram/dist/
+miniprogram/.temp/
+miniprogram/.swc/

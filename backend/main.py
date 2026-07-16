@@ -100,10 +100,6 @@ class OrderCreateRequest(BaseModel):
     sku: str = Field(min_length=1, max_length=64)
 
 
-class AIInterpretRequest(BaseModel):
-    request_id: str | None = Field(default=None, max_length=64)
-
-
 def create_app(
     db_path: str | os.PathLike[str] | None = None,
     market_service: MarketService | None = None,

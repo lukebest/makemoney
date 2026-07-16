@@ -1,3 +1,6 @@
 export default definePageConfig({
-  navigationBarTitleText: '首页'
+  navigationBarTitleText: '温度',
+  enablePullDownRefresh: true,
+  backgroundColor: '#0c0d0b',
+  backgroundTextStyle: 'light'
 })

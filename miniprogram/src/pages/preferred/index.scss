@@ -1,18 +1,81 @@
-.preferred-page {
+.screen-summary {
   display: flex;
-  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+
+  &__cell {
+    flex: 1;
+    background-color: #14150f;
+    border: 1px solid #2c2e22;
+    border-radius: 14px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+
+  &__label { font-size: 20px; color: #8d887c; }
+  &__value { font-size: 34px; font-weight: 700; color: #b2975b; }
+}
+
+.preferred-card {
+  &__head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+
+  &__rank { font-size: 26px; color: #b2975b; }
+
+  &__id { flex: 1; }
+  &__name { font-size: 32px; font-weight: 600; }
+  &__code { display: block; font-size: 22px; color: #8d887c; }
+
+  &__score { text-align: right; }
+  &__score-num { font-size: 40px; font-weight: 700; color: #eee7d6; }
+  &__setup { display: block; font-size: 20px; color: #b2975b; }
+
+  &__price {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+
+  &__last { font-size: 34px; font-weight: 600; }
+
+  &__checks {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  &__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-top: 1px solid #2c2e22;
+    padding-top: 14px;
+  }
+}
+
+.check-row {
+  display: flex;
   align-items: center;
-  padding: 48px 32px;
+  gap: 12px;
 
-  &__title {
-    font-size: 40px;
-    font-weight: 600;
-    color: #1f2329;
-  }
-
-  &__hint {
-    margin-top: 16px;
+  &__mark {
+    width: 34px;
+    text-align: center;
     font-size: 26px;
-    color: #86909c;
+
+    &--passed { color: #b93a32; }
+    &--manual { color: #b2975b; }
+    &--failed { color: #8d887c; }
   }
+
+  &__label { font-size: 24px; }
 }

@@ -1,18 +1,118 @@
-.positions-page {
+.inline-error {
+  display: block;
+  background-color: rgba(185, 58, 50, 0.15);
+  color: #eec9c6;
+  border-radius: 12px;
+  padding: 14px 18px;
+  font-size: 24px;
+  margin-bottom: 18px;
+}
+
+.capital-form {
   display: flex;
-  flex-direction: column;
+  gap: 14px;
   align-items: center;
-  padding: 48px 32px;
+  margin-bottom: 18px;
 
-  &__title {
-    font-size: 40px;
-    font-weight: 600;
-    color: #1f2329;
+  &__input {
+    flex: 1;
+    background-color: #1b1d15;
+    border: 1px solid #2c2e22;
+    border-radius: 12px;
+    padding: 16px 18px;
+    color: #eee7d6;
+    font-size: 28px;
+  }
+}
+
+.capital-metrics .metric { text-align: left; }
+
+.pos-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 0;
+  border-bottom: 1px solid #2c2e22;
+
+  &:last-child { border-bottom: none; }
+  &--warning { background-color: rgba(185, 58, 50, 0.08); }
+
+  &__id { flex: 1; }
+  &__name { font-size: 28px; font-weight: 600; }
+  &__code { display: block; font-size: 20px; color: #8d887c; }
+
+  &__nums {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex: 1;
+  }
+  &__value { font-size: 26px; font-weight: 600; }
+
+  &__actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+}
+
+.modal {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 100;
+
+  &__backdrop {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.6);
   }
 
-  &__hint {
-    margin-top: 16px;
-    font-size: 26px;
-    color: #86909c;
+  &__sheet {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-height: 88vh;
+    overflow-y: auto;
+    background-color: #14150f;
+    border-radius: 24px 24px 0 0;
+    border-top: 1px solid #2c2e22;
+    padding: 28px 24px 40px;
   }
+
+  &__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+
+  &__title { font-size: 34px; font-weight: 700; }
+  &__close { font-size: 44px; color: #8d887c; line-height: 1; }
+
+  &__error { display: block; margin: 8px 0; font-size: 24px; }
+
+  &__actions {
+    display: flex;
+    gap: 16px;
+    margin-top: 20px;
+
+    .pill-btn { flex: 1; }
+  }
+}
+
+.cost-preview {
+  background-color: #1b1d15;
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 12px;
+
+  &__value { font-size: 28px; font-weight: 600; color: #b2975b; }
 }

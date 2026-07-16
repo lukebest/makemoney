@@ -1,18 +1,71 @@
-.review-page {
+.score-lead {
+  margin-bottom: 20px;
+
+  &__label { font-size: 22px; color: #8d887c; }
+  &__value { display: block; font-size: 52px; font-weight: 700; margin: 4px 0; }
+}
+
+.month-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 0;
+
+  &__label { width: 120px; font-size: 24px; color: #8d887c; }
+
+  &__track {
+    flex: 1;
+    height: 20px;
+    background-color: #1b1d15;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  &__bar {
+    height: 100%;
+    border-radius: 10px;
+    &--gain { background-color: #b93a32; }
+    &--loss { background-color: #3d8b6d; }
+  }
+
+  &__value { width: 150px; text-align: right; font-size: 24px; }
+}
+
+.violation {
+  display: flex;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid #2c2e22;
+
+  &:last-child { border-bottom: none; }
+
+  &__idx { font-size: 26px; color: #b2975b; }
+  &__body { flex: 1; }
+  &__title { font-size: 27px; font-weight: 600; }
+  &__detail { display: block; font-size: 22px; color: #8d887c; margin-top: 2px; }
+}
+
+.clean-record {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 48px 32px;
+  gap: 8px;
+  padding: 30px 0;
 
-  &__title {
-    font-size: 40px;
-    font-weight: 600;
-    color: #1f2329;
-  }
-
-  &__hint {
-    margin-top: 16px;
-    font-size: 26px;
-    color: #86909c;
-  }
+  &__mark { font-size: 56px; color: #3d8b6d; }
+  &__title { font-size: 30px; font-weight: 600; }
 }
+
+.ai-error { display: block; margin-top: 12px; font-size: 24px; }
+
+.ai-result {
+  margin-top: 18px;
+  background-color: #1b1d15;
+  border-radius: 12px;
+  padding: 18px;
+
+  &__warning { display: block; color: #b93a32; font-size: 24px; margin-bottom: 8px; }
+  &__text { display: block; font-size: 26px; line-height: 1.7; white-space: pre-wrap; margin-bottom: 10px; }
+}
+
+.pill-btn { margin-top: 16px; }
