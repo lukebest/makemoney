@@ -120,6 +120,14 @@ h1, h2, p { margin-top: 0; }
 .daily-brief b { color: var(--brass-light); font-size: 10px; letter-spacing: .12em; }
 .daily-brief a { color: var(--ivory-dim); border-bottom: 1px solid var(--line); }
 .daily-brief a em { margin-left: 6px; font-style: normal; font-size: 11px; }
+.pick-rail {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px;
+  margin: -8px 0 22px; padding: 10px 0; border-bottom: 1px solid var(--line-soft);
+  color: var(--muted); font-size: 12px;
+}
+.pick-rail a { color: var(--ivory-dim); border-bottom: 1px solid var(--line); }
+.pick-rail a:last-child, .pick-rail span:last-child { justify-self: end; text-align: right; }
+.pick-rail strong { color: var(--brass-light); font-size: 11px; letter-spacing: .12em; }
 #main-content { width: 100%; max-width: 1540px; margin: 0 auto; }
 .page { padding: 50px clamp(26px, 4.2vw, 72px) 72px; animation: page-in .55s cubic-bezier(.2,.8,.2,1) both; }
 @keyframes page-in { from { opacity: 0; transform: translateY(8px); } }
@@ -351,7 +359,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--brass); box-shad
 .preferred-foot p { display: flex; align-items: baseline; gap: 9px; margin: 0; padding: 0 20px; border-right: 1px solid var(--line-soft); }
 .preferred-foot p span { color: var(--muted); font-size: 8px; }
 .preferred-foot p b { color: var(--ivory-dim); font: 13px var(--serif); }
-.preferred-foot .button { min-height: 32px; margin: 0 15px; display: grid; place-items: center; white-space: nowrap; }
+.preferred-foot .button { min-height: 32px; margin: 0; display: grid; place-items: center; white-space: nowrap; }
+.preferred-actions { display: flex; gap: 8px; margin: 0 15px; }
 
 /* Positions */
 .capital-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(280px, .7fr); gap: 16px; margin-bottom: 16px; }
@@ -579,6 +588,7 @@ td i { color: #44423d; font-style: normal; }
   .preferred-foot p span, .preferred-foot p b { display: block; }
   .preferred-foot p b { margin-top: 4px; }
   .preferred-foot .button { grid-column: 1 / -1; margin: 0; }
+  .preferred-actions { grid-column: 1 / -1; margin: 0; display: grid; grid-template-columns: 1fr 1fr; }
   .capital-form > div { grid-template-columns: auto minmax(0, 1fr); }
   .capital-form .button { grid-column: 1 / -1; }
   .capital-form input { font-size: 24px; }

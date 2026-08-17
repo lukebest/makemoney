@@ -45,7 +45,15 @@ function StockCards({ stocks, label }: { stocks: PreferredStock[]; label: string
             <p><span>洗盘周期</span><b>{stock.washoutDays ?? '—'} 日</b></p>
             <p><span>最大回撤</span><b>{stock.pullbackPct != null ? `${stock.pullbackPct.toFixed(1)}%` : '—'}</b></p>
             <p><span>启动低点止损参考</span><b>{stock.stopLoss?.toFixed(2) ?? '—'}</b></p>
-            <Link className="button button-ghost" to={`/stock?code=${stock.code}`}>打开个股诊断</Link>
+            <div className="preferred-actions">
+              <Link className="button button-ghost" to={`/stock?code=${stock.code}`}>打开个股诊断</Link>
+              <Link
+                className="button button-ghost"
+                to={`/trades?code=${encodeURIComponent(stock.code)}&name=${encodeURIComponent(stock.name)}&price=${stock.price}&stop=${stock.stopLoss ?? ''}`}
+              >
+                记入交易台
+              </Link>
+            </div>
           </div>
         </article>
       ))}

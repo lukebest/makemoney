@@ -204,6 +204,7 @@ export interface TodayBriefing {
     matchCount: number
     needsRun?: boolean
     items: PreferredStock[]
+    job?: CloseScreenJob
   }
   stops: Array<{ code: string; name: string; livePrice: number; stopLoss: number; message: string }>
   positionCount: number

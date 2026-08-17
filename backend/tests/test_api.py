@@ -193,6 +193,7 @@ def test_health_settings_and_cors(tmp_path):
         assert "session" in briefing.json()
         assert "action" in briefing.json()["session"]
         assert "needs_run" in briefing.json()["close_screen"]
+        assert briefing.json()["close_screen"]["job"]["status"] == "done"
 
 
 def test_stock_serves_snapshot_when_cache_cold(tmp_path):

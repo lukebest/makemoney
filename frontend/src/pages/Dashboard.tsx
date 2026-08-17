@@ -40,6 +40,14 @@ export function Dashboard() {
     }, 4000)
     return () => window.clearTimeout(timer)
   }, [])
+  const scanJob = briefing?.closeScreen.job
+  useEffect(() => {
+    if (scanJob?.status !== 'running') return
+    const timer = window.setInterval(() => {
+      void api.today(true).then(setBriefing).catch(() => undefined)
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [scanJob?.status])
 
   return (
     <div className="page">
@@ -70,7 +78,15 @@ export function Dashboard() {
             ) : briefing.discipline?.hasPlan && briefing.discipline.buyCount > 0 ? (
               <li><b>纪律</b>今日买入均在清单内</li>
             ) : null}
-            {briefing.closeScreen.needsRun && (
+            {scanJob?.status === 'running' ? (
+              <li>
+                <b>扫描</b>
+                <Link to="/preferred">
+                  已验 {scanJob.checked ?? 0}/{scanJob.total ?? '…'}
+                  {scanJob.matches != null ? ` · 通过 ${scanJob.matches}` : ''}
+                </Link>
+              </li>
+            ) : briefing.closeScreen.needsRun && (
               <li>
                 <b>今晚</b>
                 <Link to="/preferred?run=1">收盘已过，运行今晚精选</Link>

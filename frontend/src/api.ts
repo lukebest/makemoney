@@ -404,6 +404,7 @@ function normalizeToday(value: unknown): TodayBriefing {
       matchCount: numberFrom(screen.match_count),
       needsRun: Boolean(screen.needs_run),
       items: normalizePreferred(screen).items,
+      job: screen.job ? normalizeCloseScreen({ job: screen.job }).job : undefined,
     },
     stops: listFrom<JsonObject>(raw.stops, []).map((item) => ({
       code: stringFrom(item.code),

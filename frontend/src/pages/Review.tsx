@@ -54,6 +54,14 @@ export function Review() {
     try { setData(await api.review()) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
   useEffect(() => { void load() }, [load])
+  const scanJob = briefing?.closeScreen.job
+  useEffect(() => {
+    if (scanJob?.status !== 'running') return
+    const timer = window.setInterval(() => {
+      void api.today(true).then(setBriefing).catch(() => undefined)
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [scanJob?.status])
 
   const monthlyOption = useMemo<EChartsOption>(() => {
     const monthly = data?.monthly || []
@@ -126,7 +134,15 @@ export function Review() {
             ) : briefing.discipline?.hasPlan && briefing.discipline.buyCount > 0 ? (
               <li><b>纪律</b>今日买入均在清单内</li>
             ) : null}
-            {briefing.closeScreen.needsRun && (
+            {briefing.closeScreen.job?.status === 'running' ? (
+              <li>
+                <b>扫描</b>
+                <Link to="/preferred">
+                  已验 {briefing.closeScreen.job.checked ?? 0}/{briefing.closeScreen.job.total ?? '…'}
+                  {briefing.closeScreen.job.matches != null ? ` · 通过 ${briefing.closeScreen.job.matches}` : ''}
+                </Link>
+              </li>
+            ) : briefing.closeScreen.needsRun && (
               <li>
                 <b>今晚</b>
                 <Link to="/preferred?run=1">收盘已过，运行今晚精选</Link>

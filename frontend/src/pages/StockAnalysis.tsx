@@ -5,7 +5,7 @@ import { api, errorMessage } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
-import type { KlineBar, StockAnalysis as StockAnalysisData } from '../types'
+import type { KlineBar, PreferredStock, StockAnalysis as StockAnalysisData } from '../types'
 
 const ma = (bars: KlineBar[], days: number) =>
   bars.map((bar, index) => {
@@ -19,6 +19,7 @@ export function StockAnalysis() {
   const [params] = useSearchParams()
   const [code, setCode] = useState('')
   const [data, setData] = useState<StockAnalysisData>()
+  const [picks, setPicks] = useState<PreferredStock[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -57,6 +58,17 @@ export function StockAnalysis() {
       void analyze(initialCode)
     }
   }, [analyze, params])
+  useEffect(() => {
+    void api.closeScreen()
+      .then((screen) => setPicks(screen.items))
+      .catch(() => undefined)
+  }, [])
+  const pickIndex = picks.findIndex((item) => item.code === (data?.code || params.get('code')))
+  const prevPick = pickIndex > 0 ? picks[pickIndex - 1] : undefined
+  const nextPick = pickIndex >= 0 && pickIndex < picks.length - 1 ? picks[pickIndex + 1] : undefined
+  useEffect(() => {
+    if (nextPick) void api.stock(nextPick.code).catch(() => undefined)
+  }, [nextPick])
 
   const chartOption = useMemo<EChartsOption>(() => {
     if (!data?.klines?.length) return {}
@@ -112,6 +124,17 @@ export function StockAnalysis() {
         <input id="stock-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="A股 600519 / 港股通 00700" inputMode="numeric" maxLength={8} />
         <Button type="submit" disabled={loading}>{loading ? '诊断中…' : '开始诊断'}</Button>
       </form>
+      {pickIndex >= 0 && (
+        <nav className="pick-rail" aria-label="精选清单">
+          {prevPick
+            ? <Link to={`/stock?code=${prevPick.code}`}>上一只 {prevPick.name}</Link>
+            : <span>清单起点</span>}
+          <strong>精选 {pickIndex + 1} / {picks.length}</strong>
+          {nextPick
+            ? <Link to={`/stock?code=${nextPick.code}`}>下一只 {nextPick.name}</Link>
+            : <span>清单末只</span>}
+        </nav>
+      )}
       {loading && !data ? <StatusView state="loading" /> : error && !data ? <StatusView state="error" message={error} /> : !data ? (
         <div className="analysis-placeholder"><span>析</span><p>键入股票代码<br /><small>让数据先开口</small></p></div>
       ) : (

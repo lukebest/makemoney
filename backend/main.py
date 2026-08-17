@@ -198,6 +198,7 @@ def create_app(
                 "match_count": (screen or {}).get("match_count", len(tracked)),
                 "needs_run": _close_screen_needs_run(session, screen),
                 "items": tracked,
+                "job": _close_job(request),
             },
             "stops": alerts,
             "position_count": len(positions),
