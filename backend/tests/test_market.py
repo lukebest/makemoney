@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from backend.market import (
     MarketService,
     is_after_a_share_close,
+    last_completed_session,
     next_session_date,
     normalize_code,
     to_sina_symbol,
@@ -17,6 +18,15 @@ def test_close_session_helpers():
     assert is_after_a_share_close(datetime(2026, 7, 16, 14, 59, tzinfo=shanghai)) is False
     assert is_after_a_share_close(datetime(2026, 7, 16, 15, 0, tzinfo=shanghai)) is True
     assert is_after_a_share_close(datetime(2026, 7, 18, 10, 0, tzinfo=shanghai)) is True
+    assert last_completed_session(
+        datetime(2026, 7, 16, 14, 59, tzinfo=shanghai)
+    ) == date(2026, 7, 15)
+    assert last_completed_session(
+        datetime(2026, 7, 16, 15, 0, tzinfo=shanghai)
+    ) == date(2026, 7, 16)
+    assert last_completed_session(
+        datetime(2026, 7, 18, 10, 0, tzinfo=shanghai)
+    ) == date(2026, 7, 17)
 
 
 def test_normalize_and_sina_symbol():
@@ -151,3 +161,60 @@ def test_prefilter_puts_mainline_limit_up_stocks_first():
     ]
     selected = MarketService._prefilter_candidates(items, 2, {"000002"})
     assert [item["code"] for item in selected] == ["000002", "000001"]
+
+
+def test_quote_as_kline_builds_single_session_bar():
+    bar = MarketService._quote_as_kline(
+        {
+            "code": "688825",
+            "name": "N长鑫",
+            "price": 54.65,
+            "open": 49.5,
+            "high": 55.03,
+            "low": 38.11,
+            "volume": 1000,
+            "amount": 2e9,
+            "change_pct": 531.0,
+            "source": "akshare",
+        }
+    )
+    assert bar["close"] == 54.65
+    assert bar["open"] == 49.5
+    assert bar["high"] == 55.03
+    assert bar["low"] == 38.11
+
+
+def test_stock_daily_uses_live_quote_instead_of_sample_for_ipo(monkeypatch):
+    service = MarketService()
+
+    def boom(code, days):
+        raise RuntimeError("sina: empty; em: empty")
+
+    monkeypatch.setattr(service, "_fetch_daily_rows", boom)
+    monkeypatch.setattr(
+        service,
+        "quotes",
+        lambda codes: {
+            "688825": {
+                "code": "688825",
+                "name": "N长鑫",
+                "price": 54.65,
+                "open": 49.5,
+                "high": 55.03,
+                "low": 38.11,
+                "volume": 1000,
+                "amount": 2e9,
+                "change_pct": 531.0,
+                "source": "akshare",
+                "market": "A",
+                "currency": "CNY",
+            }
+        },
+    )
+    monkeypatch.setattr(service, "cny_rate", lambda code: 1.0)
+
+    result = service._load_stock_daily("688825", 120)
+    assert result["source"] == "partial"
+    assert len(result["klines"]) == 1
+    assert result["klines"][0]["close"] == 54.65
+    assert "新股" in (result["fallback_reason"] or "")

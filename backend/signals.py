@@ -260,6 +260,145 @@ def all_preferred_checks_passed(analysis: Mapping[str, Any]) -> bool:
     )
 
 
+def preferred_stock_fail_fast(
+    rows: Sequence[Mapping[str, Any]],
+    sector: str | None,
+    active_sectors: Sequence[str],
+) -> tuple[dict[str, Any] | None, str]:
+    """Cascade the five preferred checks; stop at the first failure.
+
+    Order is cheapest/most selective first so full-universe close screens can
+    skip expensive work early:
+    active_sector → volume_pile → price_volume_shift → controlled_washout → startup.
+    """
+    if not active_sectors:
+        return None, "active_sector"
+    if not sector or sector not in active_sectors:
+        return None, "active_sector"
+    if len(rows) < 40:
+        return None, "history"
+
+    recent = list(rows[-40:])
+    closes = [float(row["close"]) for row in recent]
+    volumes = [float(row.get("volume", 0)) for row in recent]
+    last = recent[-1]
+
+    base_volume = _average(volumes[-30:-10])
+    recent_volume = _average(volumes[-10:])
+    volume_spikes = (
+        sum(volume >= base_volume * 1.5 for volume in volumes[-10:])
+        if base_volume
+        else 0
+    )
+    volume_ratio = recent_volume / base_volume if base_volume else 0.0
+    if not (volume_ratio >= 1.15 and volume_spikes >= 2):
+        return None, "volume_pile"
+
+    prior_close = _average(closes[-10:-5])
+    current_close = _average(closes[-5:])
+    prior_volume = _average(volumes[-10:-5])
+    current_volume = _average(volumes[-5:])
+    if not (
+        current_close > prior_close
+        and prior_volume
+        and current_volume >= prior_volume * 0.8
+    ):
+        return None, "price_volume_shift"
+
+    pattern = recent[-25:]
+    peak_search = pattern[:-3]
+    peak_index = max(
+        range(len(peak_search)),
+        key=lambda index: float(peak_search[index]["high"]),
+    )
+    peak_price = float(pattern[peak_index]["high"])
+    after_peak = pattern[peak_index + 1 : -1]
+    trough_offset = (
+        min(
+            range(len(after_peak)),
+            key=lambda index: float(after_peak[index]["low"]),
+        )
+        if after_peak
+        else None
+    )
+    trough_index = peak_index + 1 + trough_offset if trough_offset is not None else None
+    trough_price = (
+        float(pattern[trough_index]["low"]) if trough_index is not None else peak_price
+    )
+    pullback_pct = (
+        max(0.0, (peak_price - trough_price) / peak_price * 100) if peak_price else 0.0
+    )
+    washout_days = trough_index - peak_index if trough_index is not None else 0
+    controlled_washout = (
+        trough_index is not None
+        and 1 <= washout_days <= 10
+        and 0 < pullback_pct <= 12
+        and float(last["close"]) > trough_price
+    )
+    if not controlled_washout:
+        return None, "controlled_washout"
+
+    previous_high = max(float(row["high"]) for row in recent[-21:-1])
+    average_volume = _average(volumes[-20:])
+    # Lazy MA only for survivors of cheaper gates.
+    ma5 = _average(closes[-5:])
+    ma10 = _average(closes[-10:])
+    ma20 = _average(closes[-20:])
+    moving_averages_up = ma5 > ma10 > ma20
+    startup_signal = (
+        float(last["close"]) >= previous_high * 0.98
+        and float(last.get("volume", 0)) >= average_volume
+        and moving_averages_up
+    )
+    if not startup_signal:
+        return None, "startup_signal"
+
+    stop_loss = round(min(float(row["low"]) for row in recent[-10:]), 3)
+    checks = [
+        {
+            "key": "volume_pile",
+            "label": "主力入场有量",
+            "status": "passed",
+            "detail": f"近10日量能为前期的 {volume_ratio:.2f} 倍，显著放量 {volume_spikes} 天",
+        },
+        {
+            "key": "controlled_washout",
+            "label": "洗盘短而可控",
+            "status": "passed",
+            "detail": f"高点后 {washout_days} 日见低，最大回撤 {pullback_pct:.1f}%",
+        },
+        {
+            "key": "price_volume_shift",
+            "label": "洗盘后价量重心上移",
+            "status": "passed",
+            "detail": f"近5日均价抬升，量能比 {current_volume / prior_volume:.2f}",
+        },
+        {
+            "key": "startup_signal",
+            "label": "强势启动信号",
+            "status": "passed",
+            "detail": "价格接近20日高点、均线多头且成交量确认",
+        },
+        {
+            "key": "active_sector",
+            "label": "处在活跃板块",
+            "status": "passed",
+            "detail": f"{sector}位于今日热点主线",
+        },
+    ]
+    return (
+        {
+            "score": 100,
+            "setup": "重点观察",
+            "checks": checks,
+            "stop_loss": stop_loss,
+            "washout_days": washout_days,
+            "pullback_pct": round(pullback_pct, 2),
+        },
+        "passed",
+    )
+
+
 def market_structure_analysis(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:

@@ -11,6 +11,9 @@ export default defineConfig({
       '/api': {
         target: `http://127.0.0.1:${backendPort}`,
         changeOrigin: true,
+        // Full close-screen can scan hundreds of names; avoid premature proxy cutoffs.
+        timeout: 300_000,
+        proxyTimeout: 300_000,
       },
     },
   },

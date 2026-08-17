@@ -8,17 +8,19 @@ import random
 import re
 import threading
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from .chan import latest_structure
 from .signals import (
-    all_preferred_checks_passed,
     classify_market_phase,
     enrich_klines,
     market_structure_analysis,
     preferred_stock_analysis,
+    preferred_stock_fail_fast,
     stock_checklist,
     support_resistance,
     trend_label,
@@ -110,23 +112,114 @@ class MarketService:
             lambda: self._load_preferred_stocks(limit, candidate_count),
         )
 
-    def close_screen(self, candidate_count: int = 60) -> dict[str, Any]:
-        """After-close scan: keep only stocks that pass all five preferred checks."""
-        candidate_count = max(10, min(candidate_count, 100))
-        scanned = self._scan_preferred_candidates(candidate_count)
-        if scanned["source"] == "sample":
+    def close_screen(self, max_candidates: int | None = None) -> dict[str, Any]:
+        """Scan active-sector constituents as of the latest completed session.
+
+        After 15:00 China time, that session is today; otherwise the previous
+        trading day is used so the screen never depends on an unfinished bar.
+        """
+        after_close = is_after_a_share_close()
+        as_of_date = last_completed_session()
+        session_kind = "today_close" if after_close and as_of_date == china_today() else "previous_close"
+
+        spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
+        if spot["source"] == "sample":
             return {
-                **scanned,
                 "items": [],
+                "source": "sample",
+                "fallback_reason": spot.get("fallback_reason"),
+                "analyzed_count": 0,
+                "universe_count": 0,
                 "match_count": 0,
-                "as_of_date": None,
-                "for_date": None,
-                "after_close": is_after_a_share_close(),
+                "rejected_by": {},
+                "active_sectors": [],
+                "as_of_date": as_of_date.isoformat(),
+                "for_date": next_session_date(as_of_date).isoformat(),
+                "after_close": after_close,
+                "session_kind": session_kind,
+                "updated_at": _now(),
             }
 
-        matches = [
-            item for item in scanned["items"] if all_preferred_checks_passed(item)
-        ]
+        mainline = self.mainline_as_of(as_of_date)
+        active_sectors = (
+            list(mainline.get("active_sectors") or [])
+            if mainline.get("source") == "akshare"
+            else []
+        )
+        if not active_sectors:
+            return {
+                "items": [],
+                "source": "akshare",
+                "fallback_reason": "热点主线不可用，无法做五项全过收盘筛选",
+                "analyzed_count": 0,
+                "universe_count": 0,
+                "match_count": 0,
+                "rejected_by": {"active_sector": 0},
+                "active_sectors": [],
+                "as_of_date": as_of_date.isoformat(),
+                "for_date": next_session_date(as_of_date).isoformat(),
+                "after_close": after_close,
+                "session_kind": session_kind,
+                "updated_at": _now(),
+            }
+
+        sector_by_code = self._load_active_sector_universe(
+            active_sectors, mainline.get("stock_sectors") or {}
+        )
+        spot_by_code = {str(item["code"]): item for item in spot["items"]}
+        # Spot names/amounts help when available; before close, unfinished turnover
+        # is ignored as a hard gate and replaced by the as-of daily bar later.
+        candidates: list[dict[str, Any]] = []
+        rejected: Counter[str] = Counter()
+        for code, sector in sector_by_code.items():
+            quote = spot_by_code.get(code) or {
+                "code": code,
+                "name": code,
+                "price": 0.0,
+                "change_pct": 0.0,
+                "amount": 0.0,
+            }
+            name = str(quote.get("name", ""))
+            if "ST" in name.upper() or "退" in name:
+                rejected["st"] += 1
+                continue
+            amount = float(quote.get("amount", 0))
+            if after_close and amount and amount < 30_000_000:
+                rejected["liquidity"] += 1
+                continue
+            candidates.append({**quote, "sector": sector})
+
+        candidates.sort(
+            key=lambda item: (
+                float(item.get("amount", 0)),
+                float(item.get("change_pct", 0)),
+            ),
+            reverse=True,
+        )
+        if max_candidates is not None:
+            candidates = candidates[: max(1, min(int(max_candidates), 2000))]
+
+        matches: list[dict[str, Any]] = []
+        workers = min(8, max(1, len(candidates)))
+        if candidates:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(
+                        self._close_screen_one,
+                        quote,
+                        str(quote["sector"]),
+                        active_sectors,
+                        as_of_date,
+                    )
+                    for quote in candidates
+                ]
+                for future in as_completed(futures):
+                    item, stage = future.result()
+                    if item is None:
+                        rejected[stage] += 1
+                        continue
+                    matches.append(item)
+
         matches.sort(
             key=lambda item: (
                 float(item["score"]),
@@ -135,25 +228,128 @@ class MarketService:
             ),
             reverse=True,
         )
-        as_of = scanned.get("board_date") or china_today().isoformat()
-        as_of_date = date.fromisoformat(str(as_of)[:10])
         return {
             "items": matches,
-            "source": scanned["source"],
-            "fallback_reason": scanned.get("fallback_reason"),
-            "analyzed_count": scanned["analyzed_count"],
+            "source": "akshare",
+            "fallback_reason": None,
+            "analyzed_count": len(candidates),
+            "universe_count": len(sector_by_code),
             "match_count": len(matches),
-            "active_sectors": scanned.get("active_sectors") or [],
+            "rejected_by": dict(rejected),
+            "active_sectors": active_sectors,
             "as_of_date": as_of_date.isoformat(),
             "for_date": next_session_date(as_of_date).isoformat(),
-            "after_close": is_after_a_share_close(),
+            "after_close": after_close,
+            "session_kind": session_kind,
             "updated_at": _now(),
         }
+
+    def _close_screen_one(
+        self,
+        quote: Mapping[str, Any],
+        sector: str,
+        active_sectors: Sequence[str],
+        as_of_date: date,
+    ) -> tuple[dict[str, Any] | None, str]:
+        code = str(quote["code"])
+        as_of = as_of_date.isoformat()
+        try:
+            rows = self.cache.get_or_load(
+                f"close-klines:{code}:120:{as_of}",
+                1800,
+                lambda: self._daily_rows_as_of(code, 120, as_of_date),
+            )
+        except Exception:
+            return None, "kline"
+        if len(rows) < 40:
+            return None, "history"
+        last = rows[-1]
+        amount = float(last.get("amount") or 0)
+        if amount and amount < 30_000_000:
+            return None, "liquidity"
+        analysis, stage = preferred_stock_fail_fast(rows, sector, active_sectors)
+        if analysis is None:
+            return None, stage
+        return (
+            {
+                "code": code,
+                "name": quote["name"],
+                "price": float(last["close"]),
+                "change_pct": float(last.get("change_pct") or quote.get("change_pct") or 0),
+                "amount": amount or float(quote.get("amount") or 0),
+                "sector": sector,
+                "in_mainline": True,
+                **analysis,
+            },
+            "passed",
+        )
+
+    def _daily_rows_as_of(
+        self, code: str, days: int, as_of_date: date
+    ) -> list[dict[str, Any]]:
+        rows = self._fetch_daily_rows(code, days + 5)
+        as_of = as_of_date.isoformat()
+        clipped = [row for row in rows if str(row.get("date", ""))[:10] <= as_of]
+        if not clipped:
+            raise RuntimeError(f"no daily bars on or before {as_of}")
+        return clipped[-days:]
+
+    def _load_active_sector_universe(
+        self,
+        active_sectors: Sequence[str],
+        mainline_sectors: Mapping[str, str],
+    ) -> dict[str, str]:
+        """Map code → sector for every stock in today's hot industries."""
+        key = "market:active-sector-universe:" + ",".join(active_sectors)
+        return self.cache.get_or_load(
+            key,
+            1800,
+            lambda: self._fetch_active_sector_universe(
+                active_sectors, mainline_sectors
+            ),
+        )
+
+    def _fetch_active_sector_universe(
+        self,
+        active_sectors: Sequence[str],
+        mainline_sectors: Mapping[str, str],
+    ) -> dict[str, str]:
+        universe: dict[str, str] = {
+            normalize_code(code): sector
+            for code, sector in mainline_sectors.items()
+            if sector in active_sectors and is_a_share_code(normalize_code(code))
+        }
+        try:
+            ak = _import_akshare()
+        except Exception:
+            return universe
+
+        for sector in active_sectors:
+            try:
+                records = _records(ak.stock_board_industry_cons_em(symbol=sector))
+            except Exception:
+                continue
+            for row in records:
+                code = normalize_code(_pick(row, "代码", "code", default=""))
+                if not is_a_share_code(code):
+                    continue
+                name = str(_pick(row, "名称", "name", default=""))
+                if "ST" in name.upper() or "退" in name:
+                    continue
+                universe[code] = sector
+        return universe
 
     def mainline(self) -> dict[str, Any]:
         """Return today's hot sectors and consecutive-board leader ladder."""
         return self.cache.get_or_load(
             "market:mainline", 180, self._load_mainline
+        )
+
+    def mainline_as_of(self, as_of: date) -> dict[str, Any]:
+        """Limit-up mainline anchored on a completed session date."""
+        key = f"market:mainline:{as_of.isoformat()}"
+        return self.cache.get_or_load(
+            key, 1800, lambda: self._load_mainline_from(as_of)
         )
 
     def _load_preferred_stocks(
@@ -387,13 +583,17 @@ class MarketService:
 
     def _load_mainline(self) -> dict[str, Any]:
         """Load detailed limit-up records and derive sectors/leader ladders."""
+        return self._load_mainline_from(date.today())
+
+    def _load_mainline_from(self, as_of: date) -> dict[str, Any]:
+        """Load the newest non-empty limit-up pool on or before as_of."""
         try:
             ak = _import_akshare()
         except Exception as exc:
             return self._empty_mainline(_safe_reason(exc))
         errors: list[str] = []
         for back in range(8):
-            stamp = (date.today() - timedelta(days=back)).strftime("%Y%m%d")
+            stamp = (as_of - timedelta(days=back)).strftime("%Y%m%d")
             try:
                 records = _records(ak.stock_zt_pool_em(date=stamp))
             except Exception as exc:
@@ -672,20 +872,32 @@ class MarketService:
 
     def _load_stock_daily(self, code: str, days: int) -> dict[str, Any]:
         fallback_reason: str | None = None
+        rows: list[dict[str, Any]] = []
+        source = "akshare"
         try:
             rows = self._fetch_daily_rows(code, days)
-            if len(rows) < 20:
-                raise RuntimeError("AKShare returned insufficient daily history")
-            source = "akshare"
         except Exception as exc:
-            rows = self._sample_klines(code, days)
-            source = "sample"
             fallback_reason = _safe_reason(exc)
+
+        quote = self.quotes([code])[code]
+        if not rows:
+            # New listings often have a live quote before daily history APIs catch up.
+            # Prefer a single real session bar over inventing multi-day sample candles.
+            if quote.get("source") == "akshare" and float(quote.get("price", 0)) > 0:
+                rows = [self._quote_as_kline(quote)]
+                source = "partial"
+                fallback_reason = (
+                    "日线历史暂不可用（常见于新股），仅展示当日行情"
+                    + (f"；上游：{fallback_reason}" if fallback_reason else "")
+                )
+            else:
+                rows = self._sample_klines(code, days)
+                source = "sample"
+                fallback_reason = fallback_reason or "daily history unavailable"
 
         enriched = enrich_klines(rows)
         support, resistance = support_resistance(enriched)
-        quote = self.quotes([code])[code]
-        if quote["source"] == "sample" and source == "akshare":
+        if quote["source"] == "sample" and source == "akshare" and enriched:
             quote = {
                 **quote,
                 "price": enriched[-1]["close"],
@@ -728,17 +940,18 @@ class MarketService:
                 rows = self._normalize_klines(
                     _records(ak.stock_hk_daily(symbol=code, adjust="qfq"))
                 )[-days:]
-                if len(rows) >= 20:
+                if rows:
                     return rows
             except Exception as exc:
                 raise RuntimeError(f"sina HK: {_safe_reason(exc)}") from exc
-            raise RuntimeError("sina HK: insufficient rows")
+            raise RuntimeError("sina HK: empty daily history")
 
         end = date.today()
         start = end - timedelta(days=max(days * 2, 180))
         start_s = start.strftime("%Y%m%d")
         end_s = end.strftime("%Y%m%d")
         errors: list[str] = []
+        best: list[dict[str, Any]] = []
 
         # Sina first — East Money hist frequently drops the connection.
         try:
@@ -751,7 +964,10 @@ class MarketService:
             rows = self._normalize_klines(_records(frame))[-days:]
             if len(rows) >= 20:
                 return rows
-            errors.append("sina: insufficient rows")
+            if len(rows) > len(best):
+                best = rows
+            if not rows:
+                errors.append("sina: empty")
         except Exception as exc:
             errors.append(f"sina: {_safe_reason(exc)}")
 
@@ -767,12 +983,35 @@ class MarketService:
             rows = self._normalize_klines(_records(frame))[-days:]
             if len(rows) >= 20:
                 return rows
-            errors.append("em: insufficient rows")
+            if len(rows) > len(best):
+                best = rows
+            if not rows:
+                errors.append("em: empty")
         except Exception as exc:
             errors.append(f"em: {_safe_reason(exc)}")
 
+        # IPO / recent listings may only have a few real bars — keep them.
+        if best:
+            return best
         raise RuntimeError("; ".join(errors) or "daily history unavailable")
 
+    @staticmethod
+    def _quote_as_kline(quote: Mapping[str, Any]) -> dict[str, Any]:
+        price = float(quote.get("price") or 0)
+        open_price = float(quote.get("open") or price)
+        high = float(quote.get("high") or max(open_price, price))
+        low = float(quote.get("low") or min(open_price, price))
+        return {
+            "date": china_today().isoformat(),
+            "open": open_price,
+            "close": price,
+            "high": high,
+            "low": low,
+            "volume": float(quote.get("volume") or 0),
+            "amount": float(quote.get("amount") or 0),
+            "change_pct": float(quote.get("change_pct") or 0),
+            "turnover_rate": 0.0,
+        }
     @staticmethod
     def _load_hkd_cny_rate() -> float:
         fallback = float(os.getenv("HKD_CNY_RATE", "0.87"))
@@ -965,6 +1204,21 @@ def is_after_a_share_close(now: datetime | None = None) -> bool:
     if current.weekday() >= 5:
         return True
     return (current.hour, current.minute) >= (15, 0)
+
+
+def last_completed_session(now: datetime | None = None) -> date:
+    """Latest A-share session whose daily bar should be treated as final.
+
+    Weekday after 15:00 → today; otherwise walk back to the previous weekday.
+    """
+    current = now.astimezone(CHINA_TZ) if now else datetime.now(CHINA_TZ)
+    day = current.date()
+    if current.weekday() < 5 and (current.hour, current.minute) >= (15, 0):
+        return day
+    day -= timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
 
 
 def next_session_date(as_of: date) -> date:

@@ -51,7 +51,7 @@ class DummyMarket:
             "analyzed_count": candidates,
         }
 
-    def close_screen(self, candidates):
+    def close_screen(self, max_candidates=None):
         return {
             "items": [
                 {
@@ -71,12 +71,15 @@ class DummyMarket:
                 }
             ],
             "source": "akshare",
-            "analyzed_count": candidates,
+            "analyzed_count": max_candidates or 240,
+            "universe_count": 320,
             "match_count": 1,
+            "rejected_by": {"volume_pile": 180, "liquidity": 20},
             "active_sectors": ["医疗器械"],
             "as_of_date": "2026-07-16",
             "for_date": "2026-07-17",
             "after_close": True,
+            "session_kind": "today_close",
             "updated_at": "2026-07-16T15:05:00+00:00",
         }
 
@@ -153,10 +156,12 @@ def test_health_settings_and_cors(tmp_path):
         empty = client.get("/api/market/preferred/close-screen")
         assert empty.status_code == 200
         assert empty.json()["items"] == []
-        screened = client.post("/api/market/preferred/close-screen?force=true&candidates=20")
+        screened = client.post("/api/market/preferred/close-screen")
         assert screened.status_code == 200
         assert screened.json()["match_count"] == 1
+        assert screened.json()["universe_count"] == 320
         assert screened.json()["for_date"] == "2026-07-17"
+        assert screened.json()["session_kind"] == "today_close"
         saved = client.get("/api/market/preferred/close-screen?for_date=2026-07-17")
         assert saved.status_code == 200
         assert saved.json()["items"][0]["code"] == "600519"

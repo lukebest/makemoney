@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .ai import AIService
 from .db import Database
-from .market import MarketService, is_after_a_share_close, is_hk_code, normalize_code
+from .market import MarketService, is_hk_code, normalize_code
 from .signals import review_statistics, stop_loss_status
 
 
@@ -173,19 +173,18 @@ def create_app(
     @application.post("/api/market/preferred/close-screen", tags=["market"])
     def run_close_screen(
         request: Request,
-        candidates: int = Query(default=60, ge=10, le=100),
-        force: bool = Query(default=False),
+        max_candidates: int | None = Query(default=None, ge=10, le=2000),
     ) -> dict[str, Any]:
-        if not force and not is_after_a_share_close():
-            raise HTTPException(
-                status_code=409,
-                detail="收盘筛选仅在 A 股收盘后（15:00 起）可用；调试可加 force=true",
-            )
-        result = _market(request).close_screen(candidates)
+        result = _market(request).close_screen(max_candidates)
         if result.get("source") == "sample":
             raise HTTPException(
                 status_code=503,
                 detail="实时行情暂不可用，无法生成收盘精选",
+            )
+        if result.get("fallback_reason") and not result.get("universe_count"):
+            raise HTTPException(
+                status_code=503,
+                detail=str(result["fallback_reason"]),
             )
         if not result.get("as_of_date") or not result.get("for_date"):
             raise HTTPException(status_code=503, detail="无法确定交易日")

@@ -5,6 +5,7 @@ from backend.signals import (
     moving_average,
     market_structure_analysis,
     preferred_stock_analysis,
+    preferred_stock_fail_fast,
     review_statistics,
     stop_loss_status,
     support_resistance,
@@ -108,6 +109,11 @@ def test_preferred_stock_scores_active_sector_automatically():
     assert all_preferred_checks_passed(active) is True
     assert all_preferred_checks_passed(inactive) is False
     assert all_preferred_checks_passed(preferred_stock_analysis(enriched)) is False
+    passed, stage = preferred_stock_fail_fast(enriched, "医疗器械", ["医疗器械"])
+    assert stage == "passed"
+    assert passed is not None and passed["score"] == 100
+    missing, rejected = preferred_stock_fail_fast(enriched, "银行", ["医疗器械"])
+    assert missing is None and rejected == "active_sector"
 
 
 def test_preferred_stock_analysis_rejects_short_history():

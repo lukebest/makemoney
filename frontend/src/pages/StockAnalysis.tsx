@@ -108,10 +108,22 @@ export function StockAnalysis() {
               <span>akshare 上游暂不可用，当前 K 线为模拟数据，不能作为交易依据。</span>
             </div>
           )}
-          {data.source === 'partial' && (
+          {data.source === 'partial' && (data.klines?.length ?? 0) <= 5 && (
+            <div className="source-notice" role="status">
+              <strong>新股 / 日线不足</strong>
+              <span>{data.fallbackReason || '历史日线暂不可用，仅展示当日真实行情；均线与结构信号暂不可靠。'}</span>
+            </div>
+          )}
+          {data.source === 'partial' && (data.klines?.length ?? 0) > 5 && (
             <div className="source-notice" role="status">
               <strong>行情延迟</strong>
               <span>实时现价暂不可用，当前价格为最近交易日收盘价；K 线仍为真实历史数据。</span>
+            </div>
+          )}
+          {data.source === 'akshare' && (data.klines?.length ?? 0) > 0 && (data.klines?.length ?? 0) < 20 && (
+            <div className="source-notice" role="status">
+              <strong>历史偏短</strong>
+              <span>仅有 {data.klines.length} 个交易日（常见于新股），均线与结构信号仅供参考。</span>
             </div>
           )}
           <section className="stock-ticker">

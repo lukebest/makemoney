@@ -79,13 +79,21 @@ export function PreferredStocks() {
     setScanning(true)
     setScanError('')
     try {
-      setCloseScreen(await api.runCloseScreen(60))
+      setCloseScreen(await api.runCloseScreen())
     } catch (reason) {
       setScanError(errorMessage(reason))
     } finally {
       setScanning(false)
     }
   }, [])
+
+  const rejectSummary = closeScreen
+    ? Object.entries(closeScreen.rejectedBy)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 3)
+      .map(([key, count]) => `${key} ${count}`)
+      .join(' · ')
+    : ''
 
   useEffect(() => {
     void load()
@@ -112,31 +120,35 @@ export function PreferredStocks() {
           <li><b>04</b><span>强势启动信号</span></li>
           <li><b>05</b><span>处在活跃板块</span></li>
         </ol>
-        <p>行业首板广度排名前三的热点板块自动进入评分；涨停池不可用时该项不计分。收盘后可跑「五项全过」精选，供次日开盘前决策。</p>
+        <p>行业首板广度排名前三的热点板块自动进入评分；涨停池不可用时该项不计分。收盘筛选会覆盖热点行业全部成分股，并按易否决条件短路加速。</p>
       </Panel>
 
       <Panel className="close-screen-panel">
         <div className="close-screen-head">
           <div>
             <span>收盘精选 · 五项全过</span>
-            <strong>供次日观察，不自动下单</strong>
+            <strong>热点行业全成分 → 短路过滤</strong>
             <p>
               {closeScreen?.asOfDate && closeScreen?.forDate
-                ? `基于 ${closeScreen.asOfDate} 收盘，面向 ${closeScreen.forDate} 交易日`
-                : '尚未生成收盘精选；建议在 15:00 后运行'}
+                ? `基于 ${closeScreen.asOfDate} 收盘（${closeScreen.sessionKind === 'previous_close' ? '上一交易日' : '当日'}），面向 ${closeScreen.forDate} 交易日`
+                : '随时可运行：15:00 后用当日收盘，此前自动改用上一交易日收盘；首次扫描可能需要一两分钟'}
             </p>
           </div>
           <Button onClick={() => void runCloseScreen()} disabled={scanning}>
-            {scanning ? '收盘筛选中…' : '运行收盘筛选'}
+            {scanning ? '全成分扫描中…' : '运行收盘筛选'}
           </Button>
         </div>
         {scanError && <StatusView state="error" message={scanError} onRetry={() => void runCloseScreen()} />}
         {!scanError && closeScreen && (
           <div className="screen-summary close-screen-summary">
-            <div><span>分析样本</span><strong>{closeScreen.analyzedCount}</strong><small>只 / 预筛候选</small></div>
+            <div><span>行业宇宙</span><strong>{closeScreen.universeCount}</strong><small>只 / 热点成分</small></div>
+            <div><span>进入验线</span><strong>{closeScreen.analyzedCount}</strong><small>只 / 流动性过门</small></div>
             <div><span>五项全过</span><strong>{closeScreen.matchCount}</strong><small>只 / 次日观察</small></div>
-            <div><span>门槛</span><strong>5 / 5</strong><small>项全部通过</small></div>
-            <time>{closeScreen.updatedAt ? `保存于 ${new Date(closeScreen.updatedAt).toLocaleString('zh-CN')}` : '尚未保存'}</time>
+            <time>
+              {rejectSummary ? `主要淘汰：${rejectSummary}` : closeScreen.updatedAt
+                ? `保存于 ${new Date(closeScreen.updatedAt).toLocaleString('zh-CN')}`
+                : '尚未保存'}
+            </time>
           </div>
         )}
         {!scanError && closeScreen && (

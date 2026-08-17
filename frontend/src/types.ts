@@ -162,9 +162,12 @@ export interface PreferredStocksData {
 
 export interface CloseScreenData extends PreferredStocksData {
   matchCount: number
+  universeCount: number
+  rejectedBy: Record<string, number>
   asOfDate?: string
   forDate?: string
   afterClose?: boolean
+  sessionKind?: 'today_close' | 'previous_close' | string
 }
 
 export interface Settings {
