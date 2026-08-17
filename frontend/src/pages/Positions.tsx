@@ -18,6 +18,7 @@ export function Positions() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [formError, setFormError] = useState('')
+  const [stale, setStale] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -27,6 +28,17 @@ export function Positions() {
       setPositions(positionData.items)
       setPortfolio(positionData.summary)
       setSettings(settingData)
+      setStale(Boolean(positionData.stale))
+      if (positionData.stale) {
+        window.setTimeout(() => {
+          void api.positionStatus().then((fresh) => {
+            if (fresh.stale) return
+            setPositions(fresh.items)
+            setPortfolio(fresh.summary)
+            setStale(false)
+          }).catch(() => undefined)
+        }, 3000)
+      }
     } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
   useEffect(() => { void load() }, [load])
@@ -128,6 +140,12 @@ export function Positions() {
       {error && <div className="inline-error" role="alert">{error}<button onClick={() => setError('')} aria-label="关闭错误">×</button></div>}
       {loading ? <StatusView state="loading" /> : (
         <>
+          {stale && (
+            <div className="source-notice" role="status">
+              <strong>报价刷新中</strong>
+              <span>先按上次行情估算市值和止损，后台正在拉取最新报价。</span>
+            </div>
+          )}
           <div className="capital-grid">
             <Panel className="capital-summary">
               <form onSubmit={saveCapital} className="capital-form">

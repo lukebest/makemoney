@@ -117,6 +117,12 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_close_screens_for_date
                     ON close_screens(for_date);
+
+                CREATE TABLE IF NOT EXISTS snapshots (
+                    key TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             position_columns = {
@@ -393,7 +399,7 @@ class Database:
                     int(bool(values.get("space_confirmed"))),
                     values.get("stop_loss"),
                     realized_pnl,
-                    0,
+                    int(bool(values.get("violated"))),
                     str(values.get("note") or ""),
                     values.get("market", position.get("market") if position else "A"),
                     values.get("currency", position.get("currency") if position else "CNY"),
@@ -568,6 +574,33 @@ class Database:
                     LIMIT 1
                     """
                 ).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_snapshot(self, key: str, payload: Mapping[str, Any]) -> None:
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO snapshots(key, payload, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (key, json.dumps(payload, ensure_ascii=False), now),
+            )
+
+    def get_snapshot(self, key: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM snapshots WHERE key = ?", (key,)
+            ).fetchone()
         if row is None:
             return None
         try:

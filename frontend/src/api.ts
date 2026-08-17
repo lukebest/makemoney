@@ -9,9 +9,11 @@ import type {
   Position,
   PositionInput,
   PreferredStocksData,
+  JournalEntry,
   ReviewData,
   Settings,
   StockAnalysis,
+  TodayBriefing,
   Trade,
   TradeInput,
 } from './types'
@@ -181,6 +183,7 @@ function normalizeStock(value: unknown): StockAnalysis {
     })),
     source: stringFrom(raw.source),
     fallbackReason: stringFrom(raw.fallback_reason),
+    stale: Boolean(raw.stale),
     support: numberFrom(raw.support),
     resistance: numberFrom(raw.resistance),
     market: stringFrom(raw.market, 'A') as StockAnalysis['market'],
@@ -236,6 +239,10 @@ function normalizePreferred(value: unknown): PreferredStocksData {
       pullbackPct: item.pullback_pct == null ? undefined : numberFrom(item.pullback_pct),
       sector: stringFrom(item.sector),
       inMainline: Boolean(item.in_mainline),
+      livePrice: item.live_price == null ? undefined : numberFrom(item.live_price),
+      liveChange: item.live_change_pct == null && item.live_change == null
+        ? undefined
+        : numberFrom(item.live_change_pct ?? item.live_change),
       checks: listFrom<JsonObject>(item.checks, []).map((check) => ({
         key: stringFrom(check.key),
         label: stringFrom(check.label),
@@ -248,6 +255,7 @@ function normalizePreferred(value: unknown): PreferredStocksData {
     analyzedCount: numberFrom(raw.analyzed_count),
     activeSectors: listFrom<string>(raw.active_sectors, []),
     updatedAt: stringFrom(raw.updated_at),
+    stale: Boolean(raw.stale),
   }
 }
 
@@ -259,6 +267,7 @@ function normalizeCloseScreen(value: unknown): CloseScreenData {
   for (const [key, entry] of Object.entries(rejectedRaw)) {
     rejectedBy[key] = numberFrom(entry)
   }
+  const job = raw.job ? objectFrom(raw.job) : null
   return {
     ...base,
     matchCount: numberFrom(raw.match_count, base.items.length),
@@ -268,6 +277,18 @@ function normalizeCloseScreen(value: unknown): CloseScreenData {
     forDate: stringFrom(raw.for_date) || undefined,
     afterClose: raw.after_close == null ? undefined : Boolean(raw.after_close),
     sessionKind: stringFrom(raw.session_kind) || undefined,
+    needsRun: Boolean(raw.needs_run),
+    job: job
+      ? {
+          status: stringFrom(job.status, 'idle'),
+          error: stringFrom(job.error) || undefined,
+          startedAt: stringFrom(job.started_at) || undefined,
+          finishedAt: stringFrom(job.finished_at) || undefined,
+          checked: job.checked == null ? undefined : numberFrom(job.checked),
+          total: job.total == null ? undefined : numberFrom(job.total),
+          matches: job.matches == null ? undefined : numberFrom(job.matches),
+        }
+      : undefined,
   }
 }
 
@@ -314,6 +335,7 @@ function normalizeTrade(value: unknown): Trade {
     market: stringFrom(raw.market, 'A') as Trade['market'],
     currency: stringFrom(raw.currency, 'CNY') as Trade['currency'],
     fxRate: numberFrom(raw.fx_rate, 1),
+    violated: Boolean(raw.violated),
   }
 }
 
@@ -329,11 +351,18 @@ function normalizeReview(value: unknown): ReviewData {
       month: stringFrom(item.month),
       profit: numberFrom(item.pnl ?? item.profit),
     })),
-    violations: Array.from({ length: violationCount }, (_, index) => ({
-      id: index + 1,
-      title: '交易纪律违例',
-      detail: '该笔交易存在未按计划执行的记录，请回看交易日志。',
-    })),
+    violations: listFrom<JsonObject>(raw.violation_items, []).length
+      ? listFrom<JsonObject>(raw.violation_items, []).map((item, index) => ({
+          id: item.id ?? index + 1,
+          date: stringFrom(item.date) || undefined,
+          title: stringFrom(item.title, '交易纪律违例'),
+          detail: stringFrom(item.detail) || undefined,
+        }))
+      : Array.from({ length: violationCount }, (_, index) => ({
+          id: index + 1,
+          title: '交易纪律违例',
+          detail: '该笔交易存在未按计划执行的记录，请回看交易日志。',
+        })),
   }
 }
 
@@ -348,7 +377,67 @@ function normalizeAIResult(value: unknown): AIResult {
   }
 }
 
+let todayCache: { at: number; data: TodayBriefing } | null = null
+
+function invalidateToday() {
+  todayCache = null
+}
+
+function normalizeToday(value: unknown): TodayBriefing {
+  const raw = objectFrom(value)
+  const session = objectFrom(raw.session)
+  const screen = objectFrom(raw.close_screen)
+  const discipline = raw.discipline ? objectFrom(raw.discipline) : null
+  return {
+    session: {
+      code: stringFrom(session.code, 'preopen'),
+      label: stringFrom(session.label, '开盘前'),
+      action: stringFrom(session.action, '先看止损，只做清单内的票'),
+      trading: Boolean(session.trading),
+      asOfDate: stringFrom(session.as_of_date),
+      forDate: stringFrom(session.for_date),
+      clock: stringFrom(session.clock),
+    },
+    closeScreen: {
+      asOfDate: stringFrom(screen.as_of_date) || undefined,
+      forDate: stringFrom(screen.for_date) || undefined,
+      matchCount: numberFrom(screen.match_count),
+      needsRun: Boolean(screen.needs_run),
+      items: normalizePreferred(screen).items,
+    },
+    stops: listFrom<JsonObject>(raw.stops, []).map((item) => ({
+      code: stringFrom(item.code),
+      name: stringFrom(item.name),
+      livePrice: numberFrom(item.live_price),
+      stopLoss: numberFrom(item.stop_loss),
+      message: stringFrom(item.message),
+    })),
+    positionCount: numberFrom(raw.position_count),
+    hasJournal: Boolean(raw.has_journal),
+    discipline: discipline
+      ? {
+          planDate: stringFrom(discipline.plan_date) || undefined,
+          hasPlan: Boolean(discipline.has_plan),
+          planCount: numberFrom(discipline.plan_count),
+          buyCount: numberFrom(discipline.buy_count),
+            offList: listFrom<JsonObject>(discipline.off_list, []).map((item) => ({
+              code: stringFrom(item.code),
+              name: stringFrom(item.name),
+              onList: Boolean(item.on_list),
+            })),
+            planCodes: listFrom<string>(discipline.plan_codes, []),
+          }
+      : undefined,
+  }
+}
+
 export const api = {
+  async today(force = false): Promise<TodayBriefing> {
+    if (!force && todayCache && Date.now() - todayCache.at < 30_000) return todayCache.data
+    const data = normalizeToday(await request<unknown>('/today'))
+    todayCache = { at: Date.now(), data }
+    return data
+  },
   market: async () => normalizeMarket(await request<unknown>('/market/overview')),
   mainline: async () => normalizeMainline(await request<unknown>('/market/mainline')),
   async aiStatus(): Promise<AIStatus> {
@@ -376,10 +465,24 @@ export const api = {
     normalizePreferred(await request<unknown>(`/market/preferred?limit=${limit}&candidates=${Math.max(limit, 12)}`)),
   closeScreen: async () =>
     normalizeCloseScreen(await request<unknown>('/market/preferred/close-screen')),
-  runCloseScreen: async () =>
+  startCloseScreen: async () =>
     normalizeCloseScreen(
       await request<unknown>('/market/preferred/close-screen', { method: 'POST' }),
     ),
+  async runCloseScreen(onUpdate?: (data: CloseScreenData) => void) {
+    let data = await api.startCloseScreen()
+    onUpdate?.(data)
+    while (data.job?.status === 'running') {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      data = await api.closeScreen()
+      onUpdate?.(data)
+    }
+    if (data.job?.status === 'error') {
+      throw new ApiError(data.job.error || '收盘筛选失败', 500)
+    }
+    invalidateToday()
+    return data
+  },
   stock: async (code: string) => normalizeStock(await request<unknown>(`/stocks/${encodeURIComponent(code)}`)),
   async settings(): Promise<Settings> {
     const raw = objectFrom(await request<unknown>('/settings'))
@@ -400,11 +503,12 @@ export const api = {
       maxInvestedRatio: numberFrom(raw.max_invested_ratio ?? raw.maxInvestedRatio, .6),
     }
   },
-  async positionStatus(): Promise<{ items: Position[]; summary: PortfolioSummary }> {
+  async positionStatus(): Promise<{ items: Position[]; summary: PortfolioSummary; stale?: boolean }> {
     const raw = objectFrom(await request<unknown>('/positions/status'))
     const summary = objectFrom(raw.summary)
     return {
       items: listFrom<unknown>(raw.items, []).map(normalizePosition),
+      stale: Boolean(raw.stale),
       summary: {
         totalCapital: numberFrom(summary.total_capital),
         investedCost: numberFrom(summary.invested_cost),
@@ -467,9 +571,43 @@ export const api = {
           : trade.reason,
       }),
     }))
+    invalidateToday()
     return normalizeTrade(result.trade ?? result)
   },
   review: async () => normalizeReview(await request<unknown>('/review')),
+  async journals() {
+    return listFrom<unknown>(await request<unknown>('/journal'), ['items', 'results']).map((item) => {
+      const raw = objectFrom(item)
+      return {
+        id: numberFrom(raw.id),
+        title: stringFrom(raw.title),
+        content: stringFrom(raw.content),
+        mood: stringFrom(raw.mood) || undefined,
+        createdAt: stringFrom(raw.created_at ?? raw.createdAt) || undefined,
+      } satisfies JournalEntry
+    })
+  },
+  async saveJournal(entry: { id?: number; title: string; content: string }) {
+    const raw = objectFrom(
+      entry.id
+        ? await request<unknown>(`/journal/${entry.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ content: entry.content }),
+          })
+        : await request<unknown>('/journal', {
+            method: 'POST',
+            body: JSON.stringify({ title: entry.title, content: entry.content, tags: ['收盘'] }),
+          }),
+    )
+    invalidateToday()
+    return {
+      id: numberFrom(raw.id),
+      title: stringFrom(raw.title),
+      content: stringFrom(raw.content),
+      mood: stringFrom(raw.mood) || undefined,
+      createdAt: stringFrom(raw.created_at ?? raw.createdAt) || undefined,
+    } satisfies JournalEntry
+  },
 }
 
 export function errorMessage(error: unknown): string {

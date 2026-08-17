@@ -102,6 +102,24 @@ h1, h2, p { margin-top: 0; }
 }
 .top-strip i { width: 30px; height: 1px; background: var(--brass); opacity: .55; }
 .top-strip em { margin-left: auto; color: #888276; font-style: normal; }
+.jump-form { margin-left: auto; }
+.jump-form input {
+  width: 108px; height: 26px; padding: 0 10px; border: 1px solid var(--line-soft);
+  background: #10120f; color: var(--ivory-dim); letter-spacing: .08em;
+}
+.live-dot.idle { background: #6d6960; box-shadow: none; animation: none; }
+.daily-brief {
+  display: grid; grid-template-columns: minmax(220px, .7fr) 1fr; gap: 18px; align-items: center;
+  margin: -8px 0 22px; padding: 18px 22px; border: 1px solid var(--line);
+  background: linear-gradient(115deg, rgba(178,151,91,.08), transparent 55%);
+}
+.daily-brief span { color: var(--brass); font-size: 9px; letter-spacing: .16em; }
+.daily-brief strong { display: block; margin-top: 6px; font: 20px var(--serif); letter-spacing: .04em; }
+.daily-brief ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.daily-brief li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; color: var(--muted); font-size: 12px; }
+.daily-brief b { color: var(--brass-light); font-size: 10px; letter-spacing: .12em; }
+.daily-brief a { color: var(--ivory-dim); border-bottom: 1px solid var(--line); }
+.daily-brief a em { margin-left: 6px; font-style: normal; font-size: 11px; }
 #main-content { width: 100%; max-width: 1540px; margin: 0 auto; }
 .page { padding: 50px clamp(26px, 4.2vw, 72px) 72px; animation: page-in .55s cubic-bezier(.2,.8,.2,1) both; }
 @keyframes page-in { from { opacity: 0; transform: translateY(8px); } }
@@ -243,6 +261,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--brass); box-shad
 .stock-chart { height: 510px; }
 .analysis-grid { display: grid; grid-template-columns: .8fr 1.2fr; gap: 16px; }
 .verdict { margin: 0; color: var(--ivory-dim); font: 17px/2 var(--serif); }
+.trade-handoff { display: inline-grid; margin-top: 16px; place-items: center; }
 .price-levels { margin: 20px 0 0; padding-top: 14px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; letter-spacing: .04em; }
 .price-levels b { color: var(--brass-light); font: 15px var(--serif); }
 .price-levels span { margin: 0 10px; color: #4b483f; }
@@ -521,6 +540,8 @@ td i { color: #44423d; font-style: normal; }
   .page-header h1 { font-size: 30px; }
   .page-description { font-size: 12px; }
   .panel { padding: 18px 15px; }
+  .daily-brief { grid-template-columns: 1fr; padding: 16px; }
+  .jump-form { display: none; }
   .temperature-hero { grid-template-columns: 1fr; padding: 28px 18px; text-align: center; }
   .gauge-ring { width: 165px; height: 165px; }
   .season-copy { flex-direction: column; }

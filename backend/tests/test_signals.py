@@ -184,6 +184,7 @@ def test_review_statistics():
     assert stats["profit_loss_ratio"] == 2.0
     assert stats["realized_pnl"] == 100.0
     assert stats["violations"] == 1
+    assert stats["violation_items"][0]["date"] == "2026-02-02"
     assert stats["monthly_pnl"] == [
         {"month": "2026-01", "pnl": 200.0},
         {"month": "2026-02", "pnl": -100.0},

@@ -37,11 +37,12 @@ INDEXES = {
 
 
 class TTLCache:
-    """Minimal lock-protected in-memory TTL cache."""
+    """Lock-protected TTL cache with stale-while-revalidate."""
 
     def __init__(self) -> None:
         self._items: dict[str, tuple[float, Any]] = {}
         self._lock = threading.RLock()
+        self._refreshing: set[str] = set()
 
     def get_or_load(self, key: str, ttl: float, loader: Callable[[], Any]) -> Any:
         now = time.monotonic()
@@ -49,14 +50,45 @@ class TTLCache:
             cached = self._items.get(key)
             if cached and cached[0] > now:
                 return cached[1]
+            stale = cached[1] if cached else None
+            busy = key in self._refreshing
+        if stale is not None:
+            if not busy:
+                self._kick_refresh(key, ttl, loader)
+            return stale
         value = loader()
         with self._lock:
             self._items[key] = (time.monotonic() + ttl, value)
         return value
 
+    def _kick_refresh(self, key: str, ttl: float, loader: Callable[[], Any]) -> None:
+        with self._lock:
+            if key in self._refreshing:
+                return
+            self._refreshing.add(key)
+
+        def run() -> None:
+            try:
+                value = loader()
+                with self._lock:
+                    self._items[key] = (time.monotonic() + ttl, value)
+            except Exception:
+                pass
+            finally:
+                with self._lock:
+                    self._refreshing.discard(key)
+
+        threading.Thread(target=run, name=f"cache-refresh:{key}", daemon=True).start()
+
+    def peek(self, key: str) -> Any | None:
+        with self._lock:
+            cached = self._items.get(key)
+        return cached[1] if cached else None
+
     def clear(self) -> None:
         with self._lock:
             self._items.clear()
+            self._refreshing.clear()
 
 
 class MarketService:
@@ -112,7 +144,11 @@ class MarketService:
             lambda: self._load_preferred_stocks(limit, candidate_count),
         )
 
-    def close_screen(self, max_candidates: int | None = None) -> dict[str, Any]:
+    def close_screen(
+        self,
+        max_candidates: int | None = None,
+        on_progress: Callable[[Mapping[str, int]], None] | None = None,
+    ) -> dict[str, Any]:
         """Scan active-sector constituents as of the latest completed session.
 
         After 15:00 China time, that session is today; otherwise the previous
@@ -200,6 +236,19 @@ class MarketService:
             candidates = candidates[: max(1, min(int(max_candidates), 2000))]
 
         matches: list[dict[str, Any]] = []
+
+        def report(checked: int) -> None:
+            if on_progress is None:
+                return
+            on_progress(
+                {
+                    "total": len(candidates),
+                    "checked": checked,
+                    "matches": len(matches),
+                }
+            )
+
+        report(0)
         workers = min(8, max(1, len(candidates)))
         if candidates:
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -213,12 +262,13 @@ class MarketService:
                     )
                     for quote in candidates
                 ]
-                for future in as_completed(futures):
+                for checked, future in enumerate(as_completed(futures), start=1):
                     item, stage = future.result()
                     if item is None:
                         rejected[stage] += 1
-                        continue
-                    matches.append(item)
+                    else:
+                        matches.append(item)
+                    report(checked)
 
         matches.sort(
             key=lambda item: (
@@ -399,18 +449,16 @@ class MarketService:
         )
         results: list[dict[str, Any]] = []
         failures: list[str] = []
-        for quote in candidates:
+
+        def analyze_one(quote: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
             daily = self.stock_daily(quote["code"], 120)
             if daily["source"] != "akshare":
-                failures.append(
-                    f"{quote['code']}: {daily.get('fallback_reason', 'unavailable')}"
-                )
-                continue
+                return None, f"{quote['code']}: {daily.get('fallback_reason', 'unavailable')}"
             sector = sector_map.get(quote["code"])
             analysis = preferred_stock_analysis(
                 daily["klines"], sector, active_sectors
             )
-            results.append(
+            return (
                 {
                     "code": quote["code"],
                     "name": quote["name"],
@@ -420,8 +468,22 @@ class MarketService:
                     "sector": sector,
                     "in_mainline": bool(sector and sector in (active_sectors or [])),
                     **analysis,
-                }
+                },
+                None,
             )
+
+        workers = min(8, max(1, len(candidates)))
+        if candidates:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for future in as_completed(
+                    [pool.submit(analyze_one, quote) for quote in candidates]
+                ):
+                    item, failure = future.result()
+                    if item is None:
+                        if failure:
+                            failures.append(failure)
+                        continue
+                    results.append(item)
 
         results.sort(
             key=lambda item: (
@@ -1012,6 +1074,7 @@ class MarketService:
             "change_pct": float(quote.get("change_pct") or 0),
             "turnover_rate": 0.0,
         }
+
     @staticmethod
     def _load_hkd_cny_rate() -> float:
         fallback = float(os.getenv("HKD_CNY_RATE", "0.87"))
@@ -1204,6 +1267,44 @@ def is_after_a_share_close(now: datetime | None = None) -> bool:
     if current.weekday() >= 5:
         return True
     return (current.hour, current.minute) >= (15, 0)
+
+
+def session_status(now: datetime | None = None) -> dict[str, Any]:
+    """A-share session clock for the daily briefing chrome."""
+    current = now.astimezone(CHINA_TZ) if now else datetime.now(CHINA_TZ)
+    hm = (current.hour, current.minute)
+    weekday = current.weekday()
+    if weekday >= 5:
+        code, label, action = "weekend", "休市", "复盘已有精选，为下一交易日做计划"
+    elif hm < (9, 15):
+        code, label, action = "preopen", "开盘前", "先看止损，只做清单内的票"
+    elif hm < (9, 30):
+        code, label, action = "auction", "集合竞价", "对照精选，不临盘改计划"
+    elif hm < (11, 30):
+        code, label, action = "open", "交易中", "按计划执行，不追涨"
+    elif hm < (13, 0):
+        code, label, action = "lunch", "午休", "复盘上午，不新开仓"
+    elif hm < (15, 0):
+        code, label, action = "open", "交易中", "按计划执行，不追涨"
+    else:
+        code, label, action = "after_close", "已收盘", "运行收盘筛选，写下今日复盘"
+    as_of = last_completed_session(current)
+    today = current.date()
+    if code == "after_close":
+        for_date = next_session_date(today)
+    elif weekday >= 5:
+        for_date = next_session_date(today)
+    else:
+        for_date = today
+    return {
+        "code": code,
+        "label": label,
+        "action": action,
+        "trading": code == "open",
+        "as_of_date": as_of.isoformat(),
+        "for_date": for_date.isoformat(),
+        "clock": current.strftime("%H:%M"),
+    }
 
 
 def last_completed_session(now: datetime | None = None) -> date:

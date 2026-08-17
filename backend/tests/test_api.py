@@ -1,3 +1,5 @@
+import time
+
 from fastapi.testclient import TestClient
 
 from backend.main import create_app
@@ -5,6 +7,9 @@ from backend.main import create_app
 
 class DummyCache:
     def clear(self):
+        return None
+
+    def peek(self, key):
         return None
 
 
@@ -51,8 +56,8 @@ class DummyMarket:
             "analyzed_count": candidates,
         }
 
-    def close_screen(self, max_candidates=None):
-        return {
+    def close_screen(self, max_candidates=None, on_progress=None):
+        result = {
             "items": [
                 {
                     "code": "600519",
@@ -82,6 +87,15 @@ class DummyMarket:
             "session_kind": "today_close",
             "updated_at": "2026-07-16T15:05:00+00:00",
         }
+        if on_progress:
+            on_progress(
+                {
+                    "total": result["analyzed_count"],
+                    "checked": result["analyzed_count"],
+                    "matches": result["match_count"],
+                }
+            )
+        return result
 
     def mainline(self):
         return {
@@ -158,13 +172,188 @@ def test_health_settings_and_cors(tmp_path):
         assert empty.json()["items"] == []
         screened = client.post("/api/market/preferred/close-screen")
         assert screened.status_code == 200
-        assert screened.json()["match_count"] == 1
-        assert screened.json()["universe_count"] == 320
-        assert screened.json()["for_date"] == "2026-07-17"
-        assert screened.json()["session_kind"] == "today_close"
+        payload = screened.json()
+        for _ in range(40):
+            if payload.get("job", {}).get("status") != "running":
+                break
+            time.sleep(0.05)
+            payload = client.get("/api/market/preferred/close-screen").json()
+        assert payload["job"]["status"] == "done"
+        assert payload["job"]["checked"] == payload["analyzed_count"]
+        assert payload["job"]["matches"] == 1
         saved = client.get("/api/market/preferred/close-screen?for_date=2026-07-17")
         assert saved.status_code == 200
         assert saved.json()["items"][0]["code"] == "600519"
+        assert saved.json()["match_count"] == 1
+        assert saved.json()["universe_count"] == 320
+        assert saved.json()["for_date"] == "2026-07-17"
+        assert saved.json()["session_kind"] == "today_close"
+        briefing = client.get("/api/today")
+        assert briefing.status_code == 200
+        assert "session" in briefing.json()
+        assert "action" in briefing.json()["session"]
+        assert "needs_run" in briefing.json()["close_screen"]
+
+
+def test_stock_serves_snapshot_when_cache_cold(tmp_path):
+    with make_client(tmp_path) as client:
+        client.app.state.db.save_snapshot(
+            "stock:600519:120",
+            {
+                "code": "600519",
+                "name": "贵州茅台",
+                "klines": [{"date": "2026-07-16", "open": 1, "close": 2, "high": 3, "low": 1, "volume": 10}],
+                "source": "akshare",
+            },
+        )
+        payload = client.get("/api/stocks/600519").json()
+        assert payload["stale"] is True
+        assert payload["klines"][0]["date"] == "2026-07-16"
+
+
+def test_preferred_serves_snapshot_when_cache_cold(tmp_path):
+    with make_client(tmp_path) as client:
+        client.app.state.db.save_snapshot(
+            "preferred",
+            {
+                "items": [{"code": "000001", "name": "平安银行", "score": 60, "setup": "继续跟踪"}],
+                "source": "akshare",
+                "analyzed_count": 12,
+            },
+        )
+        payload = client.get("/api/market/preferred?limit=1&candidates=3").json()
+        assert payload["stale"] is True
+        assert payload["items"][0]["code"] == "000001"
+
+
+def test_today_flags_buy_off_the_close_screen_list(tmp_path):
+    with make_client(tmp_path) as client:
+        session = client.get("/api/today").json()["session"]
+        plan_date = (
+            session["as_of_date"]
+            if session["code"] in ("after_close", "weekend")
+            else session["for_date"]
+        )
+        client.app.state.db.save_close_screen(
+            {
+                "items": [{"code": "600519", "name": "贵州茅台", "score": 100}],
+                "as_of_date": "2020-01-01",
+                "for_date": plan_date,
+                "match_count": 1,
+            }
+        )
+        bought = client.post(
+            "/api/trades",
+            json={
+                "code": "000001",
+                "name": "平安银行",
+                "side": "buy",
+                "quantity": 100,
+                "price": 10,
+                "logic": "趋势向上且基本面在能力圈",
+                "funds_confirmed": True,
+                "space_confirmed": True,
+                "stop_loss": 9,
+            },
+        )
+        assert bought.status_code == 201
+        discipline = client.get("/api/today").json()["discipline"]
+        assert discipline["has_plan"] is True
+        assert "600519" in discipline["plan_codes"]
+        assert discipline["off_list"][0]["code"] == "000001"
+        review = client.get("/api/review").json()
+        assert review["violations"] == 1
+        assert review["violation_items"][0]["code"] == "000001"
+
+
+def test_close_screen_needs_run_when_saved_as_of_is_stale(tmp_path):
+    with make_client(tmp_path) as client:
+        client.app.state.db.save_close_screen(
+            {
+                "items": [],
+                "as_of_date": "2020-01-02",
+                "for_date": "2020-01-03",
+                "match_count": 0,
+            }
+        )
+        briefing = client.get("/api/today").json()
+        saved = client.get("/api/market/preferred/close-screen").json()
+        assert saved["needs_run"] == briefing["close_screen"]["needs_run"]
+        if briefing["session"]["code"] in ("after_close", "weekend"):
+            assert briefing["close_screen"]["needs_run"] is True
+
+
+def test_today_attaches_live_change_when_spot_is_warm(tmp_path):
+    class WarmCache(DummyCache):
+        def peek(self, key):
+            if key == "market:spot":
+                return {"source": "akshare", "items": []}
+            return None
+
+    class WarmMarket(DummyMarket):
+        cache = WarmCache()
+
+    app = create_app(tmp_path / "test.db", WarmMarket(), ai_service=DummyAI())
+    with TestClient(app) as client:
+        client.app.state.db.save_close_screen(
+            {
+                "items": [
+                    {"code": "600519", "name": "贵州茅台", "score": 100, "change_pct": 3.2}
+                ],
+                "as_of_date": "2026-07-16",
+                "for_date": "2026-07-17",
+                "match_count": 1,
+            }
+        )
+        pick = client.get("/api/today").json()["close_screen"]["items"][0]
+        assert pick["code"] == "600519"
+        assert pick["live_price"] == 8.0
+        assert pick["live_change_pct"] == -1.0
+
+
+def test_positions_status_uses_saved_quotes_when_spot_cold(tmp_path):
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/positions",
+            json={
+                "code": "000001",
+                "name": "平安银行",
+                "quantity": 100,
+                "avg_price": 10,
+                "stop_loss": 9,
+            },
+        )
+        assert created.status_code == 201
+        client.app.state.db.save_snapshot(
+            "position-quotes",
+            {"000001": {"price": 8.0, "change_pct": -2.0, "source": "akshare"}},
+        )
+        payload = client.get("/api/positions/status").json()
+        assert payload["stale"] is True
+        assert payload["items"][0]["live_price"] == 8.0
+        assert payload["items"][0]["stop_triggered"] is True
+
+
+def test_today_reads_stop_alerts_from_saved_quotes(tmp_path):
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/positions",
+            json={
+                "code": "000001",
+                "name": "平安银行",
+                "quantity": 100,
+                "avg_price": 10,
+                "stop_loss": 9,
+            },
+        )
+        assert created.status_code == 201
+        client.app.state.db.save_snapshot(
+            "position-quotes",
+            {"000001": {"price": 8.0, "change_pct": -2.0, "source": "test"}},
+        )
+        briefing = client.get("/api/today").json()
+        assert briefing["position_count"] == 1
+        assert briefing["stops"][0]["code"] == "000001"
 
 
 def test_hong_kong_connect_buy_allows_non_a_share_lot(tmp_path):
@@ -332,6 +521,7 @@ def test_position_and_journal_crud(tmp_path):
         )
         assert created.status_code == 201
         journal_id = created.json()["id"]
+        assert client.get("/api/today").json()["has_journal"] is True
         updated = client.patch(
             f"/api/journal/{journal_id}", json={"mood": "冷静"}
         )

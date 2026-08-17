@@ -1,4 +1,7 @@
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { FormEvent, useEffect, useState } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { api } from '../api'
+import type { SessionStatus } from '../types'
 
 const links = [
   { to: '/', label: '大盘温度', short: '温度', glyph: '温', end: true },
@@ -11,7 +14,32 @@ const links = [
 
 export function Layout() {
   const location = useLocation()
+  const navigate = useNavigate()
   const active = links.find((link) => link.end ? location.pathname === '/' : location.pathname.startsWith(link.to))
+  const [session, setSession] = useState<SessionStatus>()
+  const [query, setQuery] = useState('')
+
+  useEffect(() => {
+    const load = () => { void api.today().then((brief) => setSession(brief.session)).catch(() => undefined) }
+    load()
+    void api.market().catch(() => undefined)
+    void api.mainline().catch(() => undefined)
+    void api.preferred().catch(() => undefined)
+    const retry = window.setTimeout(load, 4000)
+    const timer = window.setInterval(load, 60_000)
+    return () => {
+      window.clearTimeout(retry)
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  const jump = (event: FormEvent) => {
+    event.preventDefault()
+    const code = query.replace(/\D/g, '')
+    if (code.length < 5) return
+    navigate(`/stock?code=${code}`)
+    setQuery('')
+  }
 
   return (
     <div className="app-shell">
@@ -33,17 +61,21 @@ export function Layout() {
           <span>交易守则</span>
           <blockquote>看不懂，不做。<br />没计划，不动。</blockquote>
         </div>
-        <div className="market-clock">
-          <span className="live-dot" />
-          <span>终端已连接</span>
+        <div className={`market-clock session-${session?.code || 'unknown'}`}>
+          <span className={session?.trading ? 'live-dot' : 'live-dot idle'} />
+          <span>{session ? `${session.label} ${session.clock}` : '正在对时'}</span>
         </div>
       </aside>
 
       <div className="main-wrap">
-        <div className="top-strip" aria-hidden="true">
+        <div className="top-strip">
           <span>{active?.label || '知止终端'}</span>
           <i />
-          <span>纪律是收益的边界</span>
+          <span>{session?.action || '纪律是收益的边界'}</span>
+          <form className="jump-form" onSubmit={jump}>
+            <label className="sr-only" htmlFor="jump-code">跳转股票代码</label>
+            <input id="jump-code" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="代码直达" inputMode="numeric" maxLength={8} />
+          </form>
           <em>{new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' })}</em>
         </div>
         <main id="main-content"><Outlet /></main>

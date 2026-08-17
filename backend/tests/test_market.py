@@ -7,6 +7,7 @@ from backend.market import (
     last_completed_session,
     next_session_date,
     normalize_code,
+    session_status,
     to_sina_symbol,
 )
 
@@ -27,6 +28,12 @@ def test_close_session_helpers():
     assert last_completed_session(
         datetime(2026, 7, 18, 10, 0, tzinfo=shanghai)
     ) == date(2026, 7, 17)
+    morning = session_status(datetime(2026, 7, 16, 9, 10, tzinfo=shanghai))
+    assert morning["code"] == "preopen"
+    assert morning["for_date"] == "2026-07-16"
+    closed = session_status(datetime(2026, 7, 16, 15, 5, tzinfo=shanghai))
+    assert closed["code"] == "after_close"
+    assert closed["for_date"] == "2026-07-17"
 
 
 def test_normalize_and_sina_symbol():

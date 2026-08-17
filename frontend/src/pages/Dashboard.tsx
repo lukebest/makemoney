@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
-import type { MarketMainline, MarketOverview, MarketPhase } from '../types'
+import type { MarketMainline, MarketOverview, MarketPhase, TodayBriefing } from '../types'
 
 const seasons: Array<{ key: MarketPhase; name: string; cn: string; action: string }> = [
   { key: 'spring', name: '春', cn: '复苏', action: '试探布局' },
@@ -13,12 +14,14 @@ const seasons: Array<{ key: MarketPhase; name: string; cn: string; action: strin
 export function Dashboard() {
   const [data, setData] = useState<MarketOverview>()
   const [mainline, setMainline] = useState<MarketMainline>()
+  const [briefing, setBriefing] = useState<TodayBriefing>()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
+    const todayP = api.today().then(setBriefing).catch(() => undefined)
     try {
       const [market, line] = await Promise.all([
         api.market(),
@@ -26,10 +29,17 @@ export function Dashboard() {
       ])
       setData(market)
       setMainline(line)
+      await todayP
     } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void api.today(true).then(setBriefing).catch(() => undefined)
+    }, 4000)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   return (
     <div className="page">
@@ -39,6 +49,55 @@ export function Dashboard() {
         description="市场有温度，仓位有分寸。让趋势决定进退，不让情绪代替判断。"
         actions={data?.updatedAt && <span className="asof">更新于 {new Date(data.updatedAt).toLocaleTimeString('zh-CN')}</span>}
       />
+      {briefing && (
+        <section className="daily-brief" aria-label="今日行动">
+          <div>
+            <span>今日行动 · {briefing.session.label}</span>
+            <strong>{briefing.session.action}</strong>
+          </div>
+          <ol>
+            {briefing.stops.length ? briefing.stops.slice(0, 2).map((stop) => (
+              <li key={stop.code}><b>止损</b><Link to={`/stock?code=${stop.code}`}>{stop.name}</Link> 已触发</li>
+            )) : <li><b>止损</b>{briefing.positionCount ? '持仓暂无触发' : '当前空仓'}</li>}
+            {briefing.discipline?.offList.length ? (
+              <li>
+                <b>纪律</b>
+                今日买入不在清单：
+                {briefing.discipline.offList.slice(0, 3).map((item) => (
+                  <Link key={item.code} to={`/stock?code=${item.code}`}>{item.name}</Link>
+                ))}
+              </li>
+            ) : briefing.discipline?.hasPlan && briefing.discipline.buyCount > 0 ? (
+              <li><b>纪律</b>今日买入均在清单内</li>
+            ) : null}
+            {briefing.closeScreen.needsRun && (
+              <li>
+                <b>今晚</b>
+                <Link to="/preferred?run=1">收盘已过，运行今晚精选</Link>
+              </li>
+            )}
+            {(briefing.session.code === 'after_close' || briefing.session.code === 'weekend') && !briefing.hasJournal && (
+              <li>
+                <b>复盘</b>
+                <Link to="/review">写下今日一笔</Link>
+              </li>
+            )}
+            <li>
+              <b>{briefing.closeScreen.needsRun ? '上次' : '精选'}</b>
+              {briefing.closeScreen.items.length
+                ? briefing.closeScreen.items.slice(0, 3).map((item) => (
+                  <Link key={item.code} to={`/stock?code=${item.code}`}>
+                    {item.name}
+                    {item.liveChange != null && (
+                      <em className={item.liveChange >= 0 ? 'gain' : 'loss'}>{percent(item.liveChange)}</em>
+                    )}
+                  </Link>
+                ))
+                : <Link to="/preferred">尚未生成，去收盘筛选</Link>}
+            </li>
+          </ol>
+        </section>
+      )}
       {loading ? <StatusView state="loading" /> : error ? <StatusView state="error" message={error} onRetry={load} /> : !data ? <StatusView state="empty" /> : (
         <>
           {data.source === 'sample' && (

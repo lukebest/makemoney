@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Button, PageHeader, Panel, StatusView } from '../components/ui'
@@ -22,6 +23,7 @@ const nativeMoney = (value: number, currency: 'CNY' | 'HKD' = 'CNY') =>
   }).format(value || 0)
 
 export function Trades() {
+  const [params] = useSearchParams()
   const [side, setSide] = useState<TradeSide>('buy')
   const [form, setForm] = useState<TradeInput>(() => initialTrade('buy'))
   const [trades, setTrades] = useState<Trade[]>([])
@@ -30,6 +32,7 @@ export function Trades() {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [trendWarning, setTrendWarning] = useState('')
+  const [listWarning, setListWarning] = useState('')
   const [trendChecking, setTrendChecking] = useState(false)
   const [trendCheckedCode, setTrendCheckedCode] = useState('')
   const isHongKong = /^(?:HK)?\d{5}$/i.test(form.code.trim())
@@ -43,10 +46,27 @@ export function Trades() {
   }, [])
   useEffect(() => { void load() }, [load])
   useEffect(() => {
+    const code = (params.get('code') || '').replace(/\D/g, '')
+    if (code.length < 5) return
+    const price = Number(params.get('price') || 0)
+    const stop = Number(params.get('stop') || 0)
+    setSide('buy')
+    setForm((current) => ({
+      ...current,
+      side: 'buy',
+      code,
+      name: params.get('name') || current.name,
+      price: price > 0 ? price : current.price,
+      stopPrice: stop > 0 ? stop : current.stopPrice,
+      questions: current.questions || ['', '', ''],
+    }))
+  }, [params])
+  useEffect(() => {
     if (side !== 'buy') return
     const normalized = form.code.trim().toUpperCase().replace(/^(SH|SZ|HK)/, '')
     if (!/^(?:\d{5}|\d{6})$/.test(normalized)) {
       setTrendWarning('')
+      setListWarning('')
       setTrendCheckedCode('')
       return
     }
@@ -76,6 +96,15 @@ export function Trades() {
         if (!cancelled) setTrendChecking(false)
       }
     }, 600)
+    void api.today().then((brief) => {
+      if (cancelled) return
+      const codes = brief.discipline?.planCodes ?? []
+      setListWarning(
+        brief.discipline?.hasPlan && codes.length && !codes.includes(normalized)
+          ? '该股不在今日精选清单，记录后将记为纪律违例'
+          : '',
+      )
+    }).catch(() => undefined)
     return () => {
       cancelled = true
       window.clearTimeout(timer)
@@ -86,21 +115,27 @@ export function Trades() {
     setSide(next)
     setForm(initialTrade(next))
     setError('')
+    setListWarning('')
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
+    const gates = [trendWarning, listWarning].filter(Boolean)
     if (
       side === 'buy'
-      && trendWarning
-      && !window.confirm(`纪律闸门：${trendWarning}\n\n该页面记录真实交易。确认仍要记录这笔违背主升浪纪律的买入吗？`)
+      && gates.length
+      && !window.confirm(`纪律闸门：${gates.join('；')}\n\n该页面记录真实交易。确认仍要记录这笔买入吗？`)
     ) return
     setSaving(true)
     setError('')
     setSuccess('')
     try {
-      await api.createTrade(form)
-      setSuccess(`${side === 'buy' ? '买入' : '卖出'}记录已入账`)
+      const recorded = await api.createTrade(form)
+      setSuccess(
+        recorded.violated
+          ? '买入已入账，但已记为清单外违例'
+          : `${side === 'buy' ? '买入' : '卖出'}记录已入账`,
+      )
       setForm(initialTrade(side))
       await load()
     } catch (e) { setError(errorMessage(e)) } finally { setSaving(false) }
@@ -138,6 +173,7 @@ export function Trades() {
               <label className="stop-input"><span>预设止损价</span><input required type="number" min="0.01" step="0.01" value={form.stopPrice || ''} onChange={(e) => setForm({ ...form, stopPrice: Number(e.target.value) })} /></label>
               {trendChecking && <p className="trend-gate checking">正在校验是否处于主升浪…</p>}
               {trendWarning && <p className="trend-gate warning" role="alert">纪律闸门：{trendWarning}。提交时必须二次确认。</p>}
+              {listWarning && <p className="trend-gate warning" role="alert">纪律闸门：{listWarning}。提交时必须二次确认。</p>}
               {!trendChecking && trendCheckedCode && !trendWarning && <p className="trend-gate passed">趋势闸门通过：当前未发现非上升趋势或疑似出货警告。</p>}
               <AICoach
                 label="AI 审查三问回答"
@@ -172,10 +208,10 @@ export function Trades() {
       <Panel title="交易流水" eyebrow="EXECUTION HISTORY">
         {loading ? <StatusView state="loading" /> : !trades.length ? <StatusView state="empty" message="尚无交易记录" /> : <div className="trade-history">
           {[...trades].sort((a, b) => new Date(b.tradedAt).getTime() - new Date(a.tradedAt).getTime()).map((trade) => (
-            <article key={trade.id}>
+            <article key={trade.id} className={trade.violated ? 'warning-row' : undefined}>
               <time>{new Date(trade.tradedAt).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })}<small>{new Date(trade.tradedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</small></time>
               <span className={`side-badge ${trade.side}`}>{trade.side === 'buy' ? '买' : '卖'}</span>
-              <div className="trade-symbol"><b>{trade.name || trade.code}</b><small>{trade.code}{trade.market === 'HK' ? ' · 港股' : ''}</small></div>
+              <div className="trade-symbol"><b>{trade.name || trade.code}</b><small>{trade.code}{trade.market === 'HK' ? ' · 港股' : ''}{trade.violated ? ' · 违例' : ''}</small></div>
               <div><span>{trade.quantity.toLocaleString()} 股 × {trade.price.toFixed(2)}</span><strong>{nativeMoney(trade.quantity * trade.price, trade.currency)}</strong></div>
               <p>{trade.reason || trade.questions?.[0] || '—'}</p>
             </article>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Chart } from '../components/Chart'
@@ -15,6 +16,7 @@ const ma = (bars: KlineBar[], days: number) =>
   })
 
 export function StockAnalysis() {
+  const [params] = useSearchParams()
   const [code, setCode] = useState('')
   const [data, setData] = useState<StockAnalysisData>()
   const [loading, setLoading] = useState(false)
@@ -26,9 +28,21 @@ export function StockAnalysis() {
       setError('请输入 6 位 A 股或 5 位港股代码，例如 600519、00700')
       return
     }
+    const digits = normalized.replace(/^(SH|SZ|HK)/, '')
     setLoading(true)
     setError('')
-    try { setData(await api.stock(normalized.replace(/^(SH|SZ|HK)/, ''))) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
+    setData((prev) => (prev?.code === digits ? prev : undefined))
+    try {
+      const next = await api.stock(digits)
+      setData(next)
+      if (next.stale) {
+        window.setTimeout(() => {
+          void api.stock(digits).then((fresh) => {
+            if (!fresh.stale) setData(fresh)
+          }).catch(() => undefined)
+        }, 2500)
+      }
+    } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
 
   function submit(event: FormEvent) {
@@ -37,12 +51,12 @@ export function StockAnalysis() {
   }
 
   useEffect(() => {
-    const initialCode = new URLSearchParams(window.location.search).get('code')
+    const initialCode = params.get('code')
     if (initialCode) {
       setCode(initialCode)
       void analyze(initialCode)
     }
-  }, [analyze])
+  }, [analyze, params])
 
   const chartOption = useMemo<EChartsOption>(() => {
     if (!data?.klines?.length) return {}
@@ -98,10 +112,16 @@ export function StockAnalysis() {
         <input id="stock-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="A股 600519 / 港股通 00700" inputMode="numeric" maxLength={8} />
         <Button type="submit" disabled={loading}>{loading ? '诊断中…' : '开始诊断'}</Button>
       </form>
-      {loading ? <StatusView state="loading" /> : error ? <StatusView state="error" message={error} /> : !data ? (
+      {loading && !data ? <StatusView state="loading" /> : error && !data ? <StatusView state="error" message={error} /> : !data ? (
         <div className="analysis-placeholder"><span>析</span><p>键入股票代码<br /><small>让数据先开口</small></p></div>
       ) : (
         <>
+          {(data.stale || (loading && data)) && (
+            <div className="source-notice" role="status">
+              <strong>日线刷新中</strong>
+              <span>先显示上次诊断，后台正在拉取最新 K 线。</span>
+            </div>
+          )}
           {data.source === 'sample' && (
             <div className="source-notice" role="status">
               <strong>演示行情</strong>
@@ -190,6 +210,12 @@ export function StockAnalysis() {
                   run={() => api.aiInterpret(data.code)}
                 />
               )}
+              <Link
+                className="button button-ghost trade-handoff"
+                to={`/trades?code=${encodeURIComponent(data.code)}&name=${encodeURIComponent(data.name)}&price=${data.price}&stop=${data.support || ''}`}
+              >
+                记入交易台
+              </Link>
             </Panel>
             <Panel title="入场检查" eyebrow="DISCIPLINE CHECK">
               {data.checks?.length ? <ul className="check-list">{data.checks.map((item, i) => (

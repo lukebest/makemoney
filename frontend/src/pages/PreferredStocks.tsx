@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { Button, PageHeader, Panel, StatusView, percent } from '../components/ui'
 import type { CloseScreenData, PreferredStock, PreferredStocksData } from '../types'
@@ -54,6 +54,8 @@ function StockCards({ stocks, label }: { stocks: PreferredStock[]; label: string
 }
 
 export function PreferredStocks() {
+  const [params, setParams] = useSearchParams()
+  const autoRun = useRef(false)
   const [data, setData] = useState<PreferredStocksData>()
   const [closeScreen, setCloseScreen] = useState<CloseScreenData>()
   const [loading, setLoading] = useState(true)
@@ -64,10 +66,30 @@ export function PreferredStocks() {
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
+    const preferredP = api.preferred()
     try {
-      const [preferred, saved] = await Promise.all([api.preferred(), api.closeScreen()])
-      setData(preferred)
+      const saved = await api.closeScreen()
       setCloseScreen(saved)
+      if (saved.job?.status === 'running') {
+        setScanning(true)
+        void api.runCloseScreen(setCloseScreen)
+          .then(setCloseScreen)
+          .catch((reason) => setScanError(errorMessage(reason)))
+          .finally(() => setScanning(false))
+      }
+    } catch (reason) {
+      setScanError(errorMessage(reason))
+    }
+    try {
+      const preferred = await preferredP
+      setData(preferred)
+      if (preferred.stale) {
+        window.setTimeout(() => {
+          void api.preferred().then((fresh) => {
+            if (!fresh.stale) setData(fresh)
+          }).catch(() => undefined)
+        }, 3000)
+      }
     } catch (reason) {
       setError(errorMessage(reason))
     } finally {
@@ -79,7 +101,7 @@ export function PreferredStocks() {
     setScanning(true)
     setScanError('')
     try {
-      setCloseScreen(await api.runCloseScreen())
+      setCloseScreen(await api.runCloseScreen(setCloseScreen))
     } catch (reason) {
       setScanError(errorMessage(reason))
     } finally {
@@ -94,10 +116,31 @@ export function PreferredStocks() {
       .map(([key, count]) => `${key} ${count}`)
       .join(' · ')
     : ''
+  const job = closeScreen?.job
+  const scanLabel = scanning && job?.total
+    ? `已验 ${job.checked ?? 0}/${job.total} · 通过 ${job.matches ?? 0}`
+    : scanning
+      ? '后台扫描中，可先看上次结果…'
+      : '运行收盘筛选'
 
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    if (autoRun.current || params.get('run') !== '1' || scanning || !closeScreen?.needsRun) return
+    autoRun.current = true
+    setParams({}, { replace: true })
+    void runCloseScreen()
+  }, [closeScreen, params, runCloseScreen, scanning, setParams])
+
+  const watchCodes = (closeScreen?.items ?? []).slice(0, 5).map((stock) => stock.code).join(',')
+  useEffect(() => {
+    if (!watchCodes) return
+    for (const code of watchCodes.split(',')) {
+      void api.stock(code).catch(() => undefined)
+    }
+  }, [watchCodes])
 
   return (
     <div className="page preferred-page">
@@ -107,21 +150,6 @@ export function PreferredStocks() {
         description="按热点主线、放量入场、短洗盘、价量重心和强势启动五项机器规则筛选；结果只是一份观察清单，不是买入建议。"
         actions={<Button tone="ghost" onClick={() => void load()} disabled={loading}>{loading ? '筛选中…' : '重新筛选'}</Button>}
       />
-
-      <Panel className="screen-method">
-        <div className="method-lead">
-          <span>筛选路径</span>
-          <strong>涨停主线 → 强势与流动性预筛 → 120 日 K 线验证</strong>
-        </div>
-        <ol>
-          <li><b>01</b><span>主力入场有量</span></li>
-          <li><b>02</b><span>洗盘短而可控</span></li>
-          <li><b>03</b><span>价量重心上移</span></li>
-          <li><b>04</b><span>强势启动信号</span></li>
-          <li><b>05</b><span>处在活跃板块</span></li>
-        </ol>
-        <p>行业首板广度排名前三的热点板块自动进入评分；涨停池不可用时该项不计分。收盘筛选会覆盖热点行业全部成分股，并按易否决条件短路加速。</p>
-      </Panel>
 
       <Panel className="close-screen-panel">
         <div className="close-screen-head">
@@ -135,7 +163,7 @@ export function PreferredStocks() {
             </p>
           </div>
           <Button onClick={() => void runCloseScreen()} disabled={scanning}>
-            {scanning ? '全成分扫描中…' : '运行收盘筛选'}
+            {scanLabel}
           </Button>
         </div>
         {scanError && <StatusView state="error" message={scanError} onRetry={() => void runCloseScreen()} />}
@@ -158,7 +186,22 @@ export function PreferredStocks() {
         )}
       </Panel>
 
-      {loading ? <StatusView state="loading" message="正在预筛候选并逐只验证 K 线，首次加载可能需要十余秒" /> :
+      <Panel className="screen-method">
+        <div className="method-lead">
+          <span>筛选路径</span>
+          <strong>涨停主线 → 强势与流动性预筛 → 120 日 K 线验证</strong>
+        </div>
+        <ol>
+          <li><b>01</b><span>主力入场有量</span></li>
+          <li><b>02</b><span>洗盘短而可控</span></li>
+          <li><b>03</b><span>价量重心上移</span></li>
+          <li><b>04</b><span>强势启动信号</span></li>
+          <li><b>05</b><span>处在活跃板块</span></li>
+        </ol>
+        <p>行业首板广度排名前三的热点板块自动进入评分；涨停池不可用时该项不计分。收盘筛选会覆盖热点行业全部成分股，并按易否决条件短路加速。</p>
+      </Panel>
+
+      {loading ? <StatusView state="loading" message="正在预筛候选并验证 K 线" /> :
         error ? <StatusView state="error" message={error} onRetry={() => void load()} /> : data && (
           <>
             <div className="screen-summary">
@@ -167,6 +210,12 @@ export function PreferredStocks() {
               <div><span>评分口径</span><strong>5 × 20</strong><small>分 / 机器规则</small></div>
               <time>{data.updatedAt ? `更新于 ${new Date(data.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '实时计算'}</time>
             </div>
+            {data.stale && (
+              <div className="source-notice" role="status">
+                <strong>名单刷新中</strong>
+                <span>先显示上次结果，后台正在按最新行情重算。</span>
+              </div>
+            )}
             {data.source === 'sample' && (
               <div className="source-notice" role="status">
                 <strong>停止筛选</strong>

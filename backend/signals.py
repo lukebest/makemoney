@@ -637,6 +637,21 @@ def review_statistics(trades: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             for month, value in sorted(monthly.items())
         ],
         "violations": sum(bool(row.get("violated", False)) for row in rows),
+        "violation_items": [
+            {
+                "code": str(row.get("code") or ""),
+                "name": str(row.get("name") or row.get("code") or ""),
+                "date": str(row.get("traded_at") or "")[:10],
+                "title": (
+                    f"{row.get('name') or row.get('code') or '交易'} · 买入不在当日精选清单"
+                    if str(row.get("side", "")).lower() == "buy"
+                    else f"{row.get('name') or row.get('code') or '交易'} · 纪律违例"
+                ),
+                "detail": str(row.get("note") or row.get("logic") or "未按计划执行"),
+            }
+            for row in rows
+            if row.get("violated")
+        ],
     }
 
 

@@ -83,6 +83,7 @@ export interface StockAnalysis {
   klines: KlineBar[]
   source?: string
   fallbackReason?: string
+  stale?: boolean
   support?: number
   resistance?: number
   market?: 'A' | 'HK'
@@ -149,6 +150,8 @@ export interface PreferredStock {
   pullbackPct?: number
   sector?: string
   inMainline?: boolean
+  livePrice?: number
+  liveChange?: number
 }
 
 export interface PreferredStocksData {
@@ -158,6 +161,17 @@ export interface PreferredStocksData {
   analyzedCount: number
   activeSectors: string[]
   updatedAt?: string
+  stale?: boolean
+}
+
+export interface CloseScreenJob {
+  status: 'idle' | 'running' | 'done' | 'error' | string
+  error?: string
+  startedAt?: string
+  finishedAt?: string
+  checked?: number
+  total?: number
+  matches?: number
 }
 
 export interface CloseScreenData extends PreferredStocksData {
@@ -168,6 +182,40 @@ export interface CloseScreenData extends PreferredStocksData {
   forDate?: string
   afterClose?: boolean
   sessionKind?: 'today_close' | 'previous_close' | string
+  needsRun?: boolean
+  job?: CloseScreenJob
+}
+
+export interface SessionStatus {
+  code: 'preopen' | 'auction' | 'open' | 'lunch' | 'after_close' | 'weekend' | string
+  label: string
+  action: string
+  trading: boolean
+  asOfDate: string
+  forDate: string
+  clock: string
+}
+
+export interface TodayBriefing {
+  session: SessionStatus
+  closeScreen: {
+    asOfDate?: string
+    forDate?: string
+    matchCount: number
+    needsRun?: boolean
+    items: PreferredStock[]
+  }
+  stops: Array<{ code: string; name: string; livePrice: number; stopLoss: number; message: string }>
+  positionCount: number
+  hasJournal?: boolean
+  discipline?: {
+    planDate?: string
+    hasPlan: boolean
+    planCount: number
+    buyCount: number
+    offList: Array<{ code: string; name: string; onList?: boolean }>
+    planCodes?: string[]
+  }
 }
 
 export interface Settings {
@@ -229,6 +277,7 @@ export interface Trade {
   reason?: string
   stopPrice?: number
   questions?: [string, string, string]
+  violated?: boolean
   market?: 'A' | 'HK'
   currency?: 'CNY' | 'HKD'
   fxRate?: number
@@ -254,4 +303,12 @@ export interface ReviewData {
   monthly: Array<{ month: string; profit: number; trades?: number }>
   violations: Array<{ id?: string | number; date?: string; title: string; detail?: string }>
   fatalMistakes?: string[]
+}
+
+export interface JournalEntry {
+  id: number
+  title: string
+  content: string
+  mood?: string
+  createdAt?: string
 }

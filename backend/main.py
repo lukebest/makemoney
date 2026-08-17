@@ -5,16 +5,18 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 from contextlib import asynccontextmanager
-from typing import Any, Literal
+from datetime import datetime, timezone
+from typing import Any, Callable, Literal, Mapping
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .ai import AIService
-from .db import Database
-from .market import MarketService, is_hk_code, normalize_code
+from .db import Database, utc_now
+from .market import CHINA_TZ, MarketService, is_hk_code, normalize_code, session_status
 from .signals import review_statistics, stop_loss_status
 
 
@@ -98,6 +100,22 @@ def create_app(
         application.state.db = database
         application.state.market = market
         application.state.ai = ai
+
+        def warmup() -> None:
+            try:
+                overview = market.overview()
+                if overview.get("source") == "akshare":
+                    database.save_snapshot("overview", overview)
+                mainline = market.mainline()
+                if mainline.get("source") == "akshare":
+                    database.save_snapshot("mainline", mainline)
+                preferred = market.preferred_stocks()
+                if preferred.get("source") == "akshare":
+                    database.save_snapshot("preferred", preferred)
+            except Exception:
+                pass
+
+        threading.Thread(target=warmup, name="market-warmup", daemon=True).start()
         yield
         market.cache.clear()
 
@@ -136,13 +154,76 @@ def create_app(
             "market_data": "akshare_with_sample_fallback",
         }
 
+    @application.get("/api/today", tags=["system"])
+    def today_briefing(request: Request) -> dict[str, Any]:
+        db = _db(request)
+        session = session_status()
+        screen = db.get_close_screen(for_date=session["for_date"]) or db.get_close_screen()
+        positions = db.list_positions()
+        alerts: list[dict[str, Any]] = []
+        quotes, _ = _position_quotes(request, [row["code"] for row in positions])
+        for row in positions:
+            quote = quotes.get(row["code"]) or {}
+            price = float(quote.get("price") or 0)
+            if not price:
+                continue
+            status = stop_loss_status(price, float(row["stop_loss"]))
+            if status["triggered"]:
+                alerts.append(
+                    {
+                        "code": row["code"],
+                        "name": row["name"],
+                        "live_price": price,
+                        "stop_loss": row["stop_loss"],
+                        "message": "；".join(status["reasons"]),
+                    }
+                )
+        picks = list((screen or {}).get("items") or [])[:5]
+        quotes = _quotes_if_warm(request, [str(item.get("code")) for item in picks])
+        tracked = []
+        for item in picks:
+            quote = quotes.get(str(item.get("code"))) or {}
+            tracked.append(
+                {
+                    **item,
+                    "live_price": quote.get("price"),
+                    "live_change_pct": quote.get("change_pct"),
+                }
+            )
+        return {
+            "session": session,
+            "close_screen": {
+                "as_of_date": (screen or {}).get("as_of_date"),
+                "for_date": (screen or {}).get("for_date"),
+                "match_count": (screen or {}).get("match_count", len(tracked)),
+                "needs_run": _close_screen_needs_run(session, screen),
+                "items": tracked,
+            },
+            "stops": alerts,
+            "position_count": len(positions),
+            "discipline": _today_discipline(db, session),
+            "has_journal": _has_journal_for_session(db, session),
+        }
+
     @application.get("/api/market/overview", tags=["market"])
     def market_overview(request: Request) -> dict[str, Any]:
-        return _market(request).overview()
+        return _fresh_or_snapshot(
+            _db(request),
+            _market(request),
+            "market:overview",
+            "overview",
+            _market(request).overview,
+        )
 
     @application.get("/api/market/mainline", tags=["market"])
     def market_mainline(request: Request) -> dict[str, Any]:
-        return _market(request).mainline()
+        return _fresh_or_snapshot(
+            _db(request),
+            _market(request),
+            "market:mainline",
+            "mainline",
+            _market(request).mainline,
+        )
 
     @application.get("/api/market/preferred", tags=["market"])
     def preferred_stocks(
@@ -150,7 +231,14 @@ def create_app(
         limit: int = Query(default=8, ge=1, le=20),
         candidates: int = Query(default=12, ge=1, le=30),
     ) -> dict[str, Any]:
-        return _market(request).preferred_stocks(limit, max(limit, candidates))
+        count = max(limit, candidates)
+        return _fresh_or_snapshot(
+            _db(request),
+            _market(request),
+            f"market:preferred:{limit}:{count}",
+            "preferred",
+            lambda: _market(request).preferred_stocks(limit, count),
+        )
 
     @application.get("/api/market/preferred/close-screen", tags=["market"])
     def get_close_screen(
@@ -159,7 +247,7 @@ def create_app(
     ) -> dict[str, Any]:
         saved = _db(request).get_close_screen(for_date=for_date)
         if saved is None:
-            return {
+            saved = {
                 "items": [],
                 "match_count": 0,
                 "analyzed_count": 0,
@@ -168,27 +256,78 @@ def create_app(
                 "for_date": for_date,
                 "updated_at": None,
             }
-        return saved
+        return _with_close_job(
+            request,
+            {**saved, "needs_run": _close_screen_needs_run(session_status(), saved)},
+        )
 
     @application.post("/api/market/preferred/close-screen", tags=["market"])
     def run_close_screen(
         request: Request,
         max_candidates: int | None = Query(default=None, ge=10, le=2000),
     ) -> dict[str, Any]:
-        result = _market(request).close_screen(max_candidates)
-        if result.get("source") == "sample":
-            raise HTTPException(
-                status_code=503,
-                detail="实时行情暂不可用，无法生成收盘精选",
-            )
-        if result.get("fallback_reason") and not result.get("universe_count"):
-            raise HTTPException(
-                status_code=503,
-                detail=str(result["fallback_reason"]),
-            )
-        if not result.get("as_of_date") or not result.get("for_date"):
-            raise HTTPException(status_code=503, detail="无法确定交易日")
-        return _db(request).save_close_screen(result)
+        saved = _db(request).get_close_screen() or {
+            "items": [],
+            "match_count": 0,
+            "analyzed_count": 0,
+            "source": "empty",
+        }
+        with _CLOSE_JOB_LOCK:
+            if _close_job(request).get("status") == "running":
+                return _with_close_job(request, saved)
+            started = utc_now()
+            request.app.state.close_screen_job = {
+                "status": "running",
+                "error": None,
+                "started_at": started,
+            }
+
+        def work() -> None:
+            try:
+                def on_progress(stats: dict[str, int]) -> None:
+                    request.app.state.close_screen_job = {
+                        "status": "running",
+                        "error": None,
+                        "started_at": started,
+                        "checked": int(stats.get("checked") or 0),
+                        "total": int(stats.get("total") or 0),
+                        "matches": int(stats.get("matches") or 0),
+                    }
+
+                result = _market(request).close_screen(
+                    max_candidates, on_progress=on_progress
+                )
+                if result.get("source") == "sample":
+                    raise RuntimeError("实时行情暂不可用，无法生成收盘精选")
+                if result.get("fallback_reason") and not result.get("universe_count"):
+                    raise RuntimeError(str(result["fallback_reason"]))
+                if not result.get("as_of_date") or not result.get("for_date"):
+                    raise RuntimeError("无法确定交易日")
+                _db(request).save_close_screen(result)
+                last = _close_job(request)
+                request.app.state.close_screen_job = {
+                    "status": "done",
+                    "error": None,
+                    "started_at": started,
+                    "finished_at": utc_now(),
+                    "checked": last.get("checked", result.get("analyzed_count")),
+                    "total": last.get("total", result.get("analyzed_count")),
+                    "matches": last.get("matches", result.get("match_count")),
+                }
+            except Exception as exc:
+                last = _close_job(request)
+                request.app.state.close_screen_job = {
+                    "status": "error",
+                    "error": str(exc),
+                    "started_at": started,
+                    "finished_at": utc_now(),
+                    "checked": last.get("checked"),
+                    "total": last.get("total"),
+                    "matches": last.get("matches"),
+                }
+
+        threading.Thread(target=work, name="close-screen", daemon=True).start()
+        return _with_close_job(request, saved)
 
     @application.get("/api/stocks/{code}", tags=["market"])
     @application.get("/api/market/stocks/{code}/daily", tags=["market"])
@@ -198,7 +337,14 @@ def create_app(
         days: int = Query(default=120, ge=60, le=500),
     ) -> dict[str, Any]:
         try:
-            return _market(request).stock_daily(_valid_code(code), days)
+            normalized = _valid_code(code)
+            return _fresh_or_snapshot(
+                _db(request),
+                _market(request),
+                f"daily:{normalized}:{days}",
+                f"stock:{normalized}:{days}",
+                lambda: _market(request).stock_daily(normalized, days),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -288,7 +434,13 @@ def create_app(
         db = _db(request)
         market = _market(request)
         positions = db.list_positions()
-        quotes = market.quotes([row["code"] for row in positions])
+        codes = [row["code"] for row in positions]
+        quotes, stale = _position_quotes(request, codes)
+        if any(code not in quotes for code in codes):
+            quotes = market.quotes(codes)
+            if quotes:
+                db.save_snapshot("position-quotes", quotes)
+            stale = False
         settings = db.get_settings()
         total_capital = float(settings["total_capital"])
         items = []
@@ -296,8 +448,8 @@ def create_app(
         total_unrealized = 0.0
         alerts = []
         for row in positions:
-            quote = quotes[row["code"]]
-            price = float(quote["price"])
+            quote = quotes.get(row["code"]) or {}
+            price = float(quote.get("price") or row["avg_price"])
             fx_rate = market.cny_rate(row["code"])
             market_value = price * int(row["quantity"]) * fx_rate
             unrealized = (
@@ -309,11 +461,11 @@ def create_app(
             item = {
                 **row,
                 "live_price": price,
-                "price_source": quote["source"],
+                "price_source": quote.get("source") or "cost",
                 "market": quote.get("market", row.get("market", "A")),
                 "currency": quote.get("currency", row.get("currency", "CNY")),
                 "fx_rate": fx_rate,
-                "change_pct": quote["change_pct"],
+                "change_pct": float(quote.get("change_pct") or 0),
                 "market_value": round(market_value, 2),
                 "unrealized_pnl": round(unrealized, 2),
                 "unrealized_pnl_pct": round(unrealized / cost * 100, 2) if cost else 0.0,
@@ -337,6 +489,7 @@ def create_app(
         return {
             "items": items,
             "alerts": alerts,
+            "stale": stale,
             "summary": {
                 **db.portfolio_snapshot(),
                 "market_value": round(total_market_value, 2),
@@ -486,6 +639,22 @@ def create_app(
         values["market"] = quote.get("market", "HK" if is_hk_code(code) else "A")
         values["currency"] = quote.get("currency", "HKD" if is_hk_code(code) else "CNY")
         values["fx_rate"] = _market(request).cny_rate(code)
+        if payload.side == "buy":
+            session = session_status()
+            plan_date = _session_plan_date(session)
+            plan = _db(request).get_close_screen(for_date=plan_date) if plan_date else None
+            codes = {
+                str(item.get("code"))
+                for item in (plan or {}).get("items") or []
+                if item.get("code")
+            }
+            if codes and code not in codes:
+                values["violated"] = True
+                existing = str(values.get("note") or "").strip()
+                if "不在当日精选清单" not in existing:
+                    values["note"] = (
+                        f"{existing}；买入不在当日精选清单" if existing else "买入不在当日精选清单"
+                    )
         try:
             trade = _db(request).execute_trade(values)
         except ValueError as exc:
@@ -548,6 +717,157 @@ def _db(request: Request) -> Database:
 
 def _market(request: Request) -> MarketService:
     return request.app.state.market
+
+
+_CLOSE_JOB_LOCK = threading.Lock()
+
+
+def _close_job(request: Request) -> dict[str, Any]:
+    job = getattr(request.app.state, "close_screen_job", None)
+    return job if isinstance(job, dict) else {"status": "idle"}
+
+
+def _with_close_job(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    return {**payload, "job": _close_job(request)}
+
+
+def _trade_day(traded_at: str) -> str:
+    raw = str(traded_at)
+    try:
+        moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw[:10]
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(CHINA_TZ).date().isoformat()
+
+
+def _session_plan_date(session: Mapping[str, Any]) -> str:
+    if session.get("code") in {"after_close", "weekend"}:
+        return str(session.get("as_of_date") or "")
+    return str(session.get("for_date") or "")
+
+
+def _has_journal_for_session(db: Database, session: Mapping[str, Any]) -> bool:
+    day = _session_plan_date(session)
+    if not day:
+        return False
+    return any(
+        _trade_day(str(item.get("created_at") or "")) == day
+        for item in db.list_journals(limit=30)
+    )
+
+
+def _today_discipline(db: Database, session: Mapping[str, Any]) -> dict[str, Any]:
+    plan_date = _session_plan_date(session)
+    plan = db.get_close_screen(for_date=plan_date) if plan_date else None
+    codes = {
+        str(item.get("code"))
+        for item in (plan or {}).get("items") or []
+        if item.get("code")
+    }
+    buys: list[dict[str, Any]] = []
+    for trade in db.list_trades(limit=200):
+        if str(trade.get("side", "")).lower() != "buy":
+            continue
+        if plan_date and _trade_day(str(trade.get("traded_at") or "")) != plan_date:
+            continue
+        code = str(trade.get("code"))
+        buys.append(
+            {
+                "code": code,
+                "name": trade.get("name") or code,
+                "on_list": bool(codes) and code in codes,
+            }
+        )
+    return {
+        "plan_date": plan_date or None,
+        "has_plan": bool(codes),
+        "plan_count": len(codes),
+        "buy_count": len(buys),
+        "off_list": [item for item in buys if codes and not item["on_list"]],
+        "plan_codes": sorted(codes),
+    }
+
+
+def _close_screen_needs_run(session: Mapping[str, Any], screen: Mapping[str, Any] | None) -> bool:
+    if session.get("code") not in {"after_close", "weekend"}:
+        return False
+    as_of = (screen or {}).get("as_of_date")
+    return not as_of or str(as_of) != str(session.get("as_of_date"))
+
+
+def _quotes_if_warm(request: Request, codes: list[str]) -> dict[str, Any]:
+    """Return quotes only when the spot cache is already populated."""
+    if not codes:
+        return {}
+    market = _market(request)
+    peek = getattr(market.cache, "peek", None)
+    spot = peek("market:spot") if callable(peek) else None
+    hk_spot = peek("market:hk:spot") if callable(peek) else None
+    if not isinstance(spot, dict) and not isinstance(hk_spot, dict):
+        return {}
+    return market.quotes(codes)
+
+
+def _position_quotes(request: Request, codes: list[str]) -> tuple[dict[str, Any], bool]:
+    """Return last-known quotes without blocking on a spot refresh when possible."""
+    if not codes:
+        return {}, False
+    market = _market(request)
+    db = _db(request)
+    peek = getattr(market.cache, "peek", None)
+    spot = peek("market:spot") if callable(peek) else None
+    hk_spot = peek("market:hk:spot") if callable(peek) else None
+    if isinstance(spot, dict) or isinstance(hk_spot, dict):
+        quotes = market.quotes(codes)
+        db.save_snapshot("position-quotes", quotes)
+        return quotes, False
+    saved = db.get_snapshot("position-quotes") or {}
+
+    def refresh() -> None:
+        try:
+            data = market.quotes(codes)
+            if data:
+                db.save_snapshot("position-quotes", data)
+        except Exception:
+            pass
+
+    threading.Thread(target=refresh, name="position-quotes", daemon=True).start()
+    return saved, True
+
+
+def _fresh_or_snapshot(
+    db: Database,
+    market: MarketService,
+    cache_key: str,
+    snapshot_key: str,
+    loader: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    peek = getattr(market.cache, "peek", None)
+    warm = peek(cache_key) if callable(peek) else None
+    if isinstance(warm, dict):
+        if warm.get("source") == "akshare":
+            db.save_snapshot(snapshot_key, warm)
+        return warm
+    saved = db.get_snapshot(snapshot_key)
+    if saved:
+        def refresh() -> None:
+            try:
+                data = loader()
+                if data.get("source") == "akshare":
+                    db.save_snapshot(snapshot_key, data)
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=refresh, name=f"refresh:{snapshot_key}", daemon=True
+        ).start()
+        return {**saved, "stale": True}
+    data = loader()
+    if data.get("source") == "akshare":
+        db.save_snapshot(snapshot_key, data)
+    return data
 
 
 def _ai(request: Request) -> AIService:
