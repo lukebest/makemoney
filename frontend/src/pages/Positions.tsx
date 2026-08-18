@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
 import { Link } from 'react-router-dom'
-import { api, errorMessage, tapeClosed } from '../api'
+import { api, chinaClock, errorMessage, tapeClosed } from '../api'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, money, percent } from '../components/ui'
 import type { PortfolioSummary, Position, PositionInput, Settings } from '../types'
@@ -22,9 +22,11 @@ export function Positions() {
   const [stale, setStale] = useState(false)
   const [overnight, setOvernight] = useState(false)
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError('')
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) {
+      setLoading(true)
+      setError('')
+    }
     try {
       const [positionData, settingData, brief] = await Promise.all([
         api.positionStatus(),
@@ -47,9 +49,16 @@ export function Positions() {
           }).catch(() => undefined)
         }, 3000)
       }
-    } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
+    } catch (e) { if (!quiet) setError(errorMessage(e)) } finally { if (!quiet) setLoading(false) }
   }, [])
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    if (!overnight) return
+    const timer = window.setInterval(() => {
+      if (chinaClock() >= '09:30' && chinaClock() < '15:00') void load(true)
+    }, 15_000)
+    return () => window.clearInterval(timer)
+  }, [overnight, load])
 
   const marketValue = positions.reduce((sum, position) => sum + (position.marketValue ?? position.quantity * (position.currentPrice || position.costPrice) * (position.fxRate || 1)), 0)
   const cost = positions.reduce((sum, position) => sum + (position.costValue ?? position.quantity * position.costPrice * (position.fxRate || 1)), 0)

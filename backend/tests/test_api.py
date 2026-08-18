@@ -312,13 +312,35 @@ def test_close_screen_needs_run_when_saved_as_of_is_stale(tmp_path):
         briefing = client.get("/api/today").json()
         saved = client.get("/api/market/preferred/close-screen").json()
         assert saved["needs_run"] == briefing["close_screen"]["needs_run"]
-        if _tape_closed(briefing["session"]):
-            assert briefing["close_screen"]["needs_run"] is True
+        assert briefing["close_screen"]["needs_run"] is True
+
+
+def test_open_session_flags_stale_list_for_today():
+    session = {
+        "code": "open",
+        "as_of_date": "2026-08-17",
+        "for_date": "2026-08-18",
+    }
+    assert _tape_closed(session) is False
+    assert _close_screen_needs_run(session, {"as_of_date": "2026-08-14", "for_date": "2026-08-17"}) is True
+    assert _close_screen_needs_run(session, {"as_of_date": "2026-08-17", "for_date": "2026-08-18"}) is False
 
 
 def test_preopen_keeps_last_session_review_and_close_quotes():
     session = {
         "code": "preopen",
+        "as_of_date": "2026-08-17",
+        "for_date": "2026-08-18",
+    }
+    assert _tape_closed(session) is True
+    assert _session_review_date(session) == "2026-08-17"
+    assert _close_screen_needs_run(session, {"as_of_date": "2026-08-16"}) is True
+    assert _close_screen_needs_run(session, {"as_of_date": "2026-08-17"}) is False
+
+
+def test_auction_keeps_last_session_review_and_stale_list():
+    session = {
+        "code": "auction",
         "as_of_date": "2026-08-17",
         "for_date": "2026-08-18",
     }

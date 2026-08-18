@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
 import { Link } from 'react-router-dom'
-import { api, errorMessage, tapeClosed } from '../api'
+import { afterCloseSession, api, beforeOpen, errorMessage, sessionLooksStuck, tapeClosed } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, money, percent } from '../components/ui'
@@ -14,6 +14,11 @@ const chinaDay = (value?: string) => {
   } catch {
     return value.slice(0, 10)
   }
+}
+
+const journalDay = (item: JournalEntry) => {
+  const match = item.title.match(/^(\d{4}-\d{2}-\d{2})/)
+  return match ? match[1] : chinaDay(item.createdAt)
 }
 
 const defaultMistakes = [
@@ -60,8 +65,8 @@ export function Review() {
       if (!items) return
       setJournals(items)
       const current = (brief?.session.asOfDate
-        && items.find((item) => chinaDay(item.createdAt) === brief.session.asOfDate))
-        || items.find((item) => chinaDay(item.createdAt) === chinaToday())
+        && items.find((item) => journalDay(item) === brief.session.asOfDate))
+        || items.find((item) => journalDay(item) === chinaToday())
       if (current) {
         setNoteId(current.id)
         setNote(current.content)
@@ -74,8 +79,15 @@ export function Review() {
     const timer = window.setTimeout(() => {
       void api.today(true).then(setBriefing).catch(() => undefined)
     }, 4000)
-    return () => window.clearTimeout(timer)
-  }, [])
+    const tick = window.setInterval(() => {
+      if (!sessionLooksStuck(briefing?.session.code)) return
+      void api.today(true).then(setBriefing).catch(() => undefined)
+    }, 15_000)
+    return () => {
+      window.clearTimeout(timer)
+      window.clearInterval(tick)
+    }
+  }, [briefing?.session.code])
   const scanJob = briefing?.closeScreen.job
   useEffect(() => {
     if (scanJob?.status !== 'running') return
@@ -133,7 +145,7 @@ export function Review() {
         ? `清单外买入：${briefing.discipline.offList.map((item) => item.name).join('、')}`
         : '',
       briefing.closeScreen.items.length
-        ? `${briefing.closeScreen.needsRun ? '上次精选' : briefing.session.code === 'preopen' ? '昨夜精选' : '今晚精选'}：${briefing.closeScreen.items.slice(0, 5).map((item) => (
+        ? `${briefing.closeScreen.needsRun ? '上次精选' : afterCloseSession(briefing.session.code) ? '今晚精选' : '昨夜精选'}：${briefing.closeScreen.items.slice(0, 5).map((item) => (
           `${item.name}${item.liveChange != null ? ` ${percent(item.liveChange)}` : ''}`
         )).join(' · ')}`
         : '',
@@ -169,11 +181,17 @@ export function Review() {
       {briefing && (briefing.closeScreen.needsRun || briefing.closeScreen.items.length || briefing.discipline?.buyCount || briefing.discipline?.exits?.length || briefing.stops.length) ? (
         <section className="daily-brief" aria-label="精选回顾">
           <div>
-            <span>{briefing.closeScreen.needsRun ? '上次清单' : '明日观察'} · {briefing.closeScreen.asOfDate || '尚未筛选'}</span>
+            <span>{briefing.closeScreen.needsRun ? '上次清单' : afterCloseSession(briefing.session.code) ? '明日观察' : '今日观察'} · {briefing.closeScreen.asOfDate || '尚未筛选'}</span>
             <strong>
               {briefing.closeScreen.needsRun
-                ? (briefing.session.code === 'preopen' ? '开盘前先完成昨夜精选，旧清单不能当今日计划' : '收盘已过，先运行今晚精选')
-                : (briefing.session.code === 'preopen' ? '昨夜精选，今日只做清单内的票' : '今晚精选，下一交易日只做清单内的票')}
+                ? (beforeOpen(briefing.session.code)
+                  ? '开盘前先完成昨夜精选，旧清单不能当今日计划'
+                  : afterCloseSession(briefing.session.code)
+                    ? '收盘已过，先运行今晚精选'
+                    : '今日精选尚未生成，旧清单不能当计划')
+                : (afterCloseSession(briefing.session.code)
+                  ? '今晚精选，下一交易日只做清单内的票'
+                  : '昨夜精选，今日只做清单内的票')}
             </strong>
           </div>
           <ol>
@@ -206,9 +224,13 @@ export function Review() {
               </li>
             ) : briefing.closeScreen.needsRun && (
               <li>
-                <b>今晚</b>
+                <b>{afterCloseSession(briefing.session.code) ? '今晚' : '精选'}</b>
                 <button type="button" className="brief-action" onClick={startTonightScan}>
-                  {briefing.session.code === 'preopen' ? '开盘前，先完成昨夜精选' : '收盘已过，运行今晚精选'}
+                  {beforeOpen(briefing.session.code)
+                    ? '开盘前，先完成昨夜精选'
+                    : afterCloseSession(briefing.session.code)
+                      ? '收盘已过，运行今晚精选'
+                      : '今日精选尚未生成，旧清单不能当计划'}
                 </button>
                 <Link to="/preferred">看清单</Link>
               </li>
@@ -269,7 +291,7 @@ export function Review() {
           <div className="violations">
             {pastNotes.map((item) => (
               <article key={item.id}>
-                <span>{chinaDay(item.createdAt).slice(5)}</span>
+                <span>{journalDay(item).slice(5)}</span>
                 <div><b>{item.title}</b><p>{item.content}</p></div>
               </article>
             ))}

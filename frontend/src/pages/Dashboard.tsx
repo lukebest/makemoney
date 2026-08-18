@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, errorMessage, tapeClosed } from '../api'
+import { afterCloseSession, api, beforeOpen, errorMessage, nearSessionFlip, sessionLooksStuck, tapeClosed } from '../api'
 import { Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
 import type { MarketMainline, MarketOverview, MarketPhase, TodayBriefing } from '../types'
 
@@ -35,8 +35,15 @@ export function Dashboard() {
     const timer = window.setTimeout(() => {
       void api.today(true).then(setBriefing).catch(() => undefined)
     }, 4000)
-    return () => window.clearTimeout(timer)
-  }, [])
+    const tick = window.setInterval(() => {
+      if (!nearSessionFlip() && !sessionLooksStuck(briefing?.session.code)) return
+      void api.today(true).then(setBriefing).catch(() => undefined)
+    }, 15_000)
+    return () => {
+      window.clearTimeout(timer)
+      window.clearInterval(tick)
+    }
+  }, [briefing?.session.code])
   const scanJob = briefing?.closeScreen.job
   useEffect(() => {
     if (scanJob?.status !== 'running') return
@@ -115,9 +122,13 @@ export function Dashboard() {
               </li>
             ) : briefing.closeScreen.needsRun && (
               <li>
-                <b>今晚</b>
+                <b>{afterCloseSession(briefing.session.code) ? '今晚' : '精选'}</b>
                 <button type="button" className="brief-action" onClick={startTonightScan}>
-                  {briefing.session.code === 'preopen' ? '开盘前，先完成昨夜精选' : '收盘已过，运行今晚精选'}
+                  {beforeOpen(briefing.session.code)
+                    ? '开盘前，先完成昨夜精选'
+                    : afterCloseSession(briefing.session.code)
+                      ? '收盘已过，运行今晚精选'
+                      : '今日精选尚未生成，旧清单不能当计划'}
                 </button>
                 <Link to="/preferred">看清单</Link>
               </li>

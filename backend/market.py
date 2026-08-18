@@ -1361,8 +1361,13 @@ def session_status(now: datetime | None = None) -> dict[str, Any]:
 
 
 def tape_is_closed(now: datetime | None = None) -> bool:
-    """No live A-share tape: after close, weekend, or preopen before 09:15."""
-    return session_status(now).get("code") in {"after_close", "weekend", "preopen"}
+    """No continuous A-share tape: after close, weekend, preopen, or auction."""
+    return session_status(now).get("code") in {
+        "after_close",
+        "weekend",
+        "preopen",
+        "auction",
+    }
 
 
 def last_completed_session(now: datetime | None = None) -> date:

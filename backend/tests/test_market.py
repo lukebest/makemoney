@@ -32,11 +32,15 @@ def test_close_session_helpers():
     morning = session_status(datetime(2026, 7, 16, 9, 10, tzinfo=shanghai))
     assert morning["code"] == "preopen"
     assert morning["for_date"] == "2026-07-16"
+    auction = session_status(datetime(2026, 7, 16, 9, 20, tzinfo=shanghai))
+    assert auction["code"] == "auction"
+    assert auction["for_date"] == "2026-07-16"
     midnight = session_status(datetime(2026, 7, 17, 0, 7, tzinfo=shanghai))
     assert midnight["code"] == "preopen"
     assert midnight["as_of_date"] == "2026-07-16"
     assert midnight["for_date"] == "2026-07-17"
     assert tape_is_closed(datetime(2026, 7, 17, 0, 7, tzinfo=shanghai)) is True
+    assert tape_is_closed(datetime(2026, 7, 16, 9, 20, tzinfo=shanghai)) is True
     assert tape_is_closed(datetime(2026, 7, 16, 10, 0, tzinfo=shanghai)) is False
     closed = session_status(datetime(2026, 7, 16, 15, 5, tzinfo=shanghai))
     assert closed["code"] == "after_close"

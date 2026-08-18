@@ -826,8 +826,8 @@ def _trade_day(traded_at: str) -> str:
 
 
 def _tape_closed(session: Mapping[str, Any]) -> bool:
-    """No live A-share tape: after close, weekend, or preopen before 09:15."""
-    return session.get("code") in {"after_close", "weekend", "preopen"}
+    """No continuous A-share tape: after close, weekend, preopen, or auction."""
+    return session.get("code") in {"after_close", "weekend", "preopen", "auction"}
 
 
 def _session_plan_date(session: Mapping[str, Any]) -> str:
@@ -901,10 +901,17 @@ def _today_discipline(db: Database, session: Mapping[str, Any]) -> dict[str, Any
 
 
 def _close_screen_needs_run(session: Mapping[str, Any], screen: Mapping[str, Any] | None) -> bool:
-    if not _tape_closed(session):
-        return False
-    as_of = (screen or {}).get("as_of_date")
-    return not as_of or str(as_of) != str(session.get("as_of_date"))
+    as_of = str((screen or {}).get("as_of_date") or "")
+    for_date = str((screen or {}).get("for_date") or "")
+    expected_as_of = str(session.get("as_of_date") or "")
+    expected_for = str(session.get("for_date") or "")
+    if not as_of and not for_date:
+        return True
+    if expected_as_of and as_of and as_of != expected_as_of:
+        return True
+    if expected_for and for_date and for_date != expected_for:
+        return True
+    return False
 
 
 def _trade_quote(request: Request, code: str, payload: TradeCreate) -> dict[str, Any]:

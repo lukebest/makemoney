@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage, tapeClosed } from '../api'
+import { api, chinaClock, errorMessage, tapeClosed } from '../api'
 import { Button, PageHeader, Panel, StatusView, percent } from '../components/ui'
 import type { CloseScreenData, PreferredStock, PreferredStocksData } from '../types'
 
@@ -145,6 +145,15 @@ export function PreferredStocks() {
   useEffect(() => {
     void load()
   }, [load])
+  useEffect(() => {
+    if (!closedTape) return
+    const timer = window.setInterval(() => {
+      const hm = chinaClock()
+      if (hm < '09:30' || hm >= '15:00') return
+      void load()
+    }, 15_000)
+    return () => window.clearInterval(timer)
+  }, [closedTape, load])
 
   useEffect(() => {
     if (autoRun.current || params.get('run') !== '1' || scanning || !closeScreen?.needsRun) return
@@ -190,11 +199,11 @@ export function PreferredStocks() {
         {scanError && <StatusView state="error" message={scanError} onRetry={() => void runCloseScreen()} />}
         {!scanError && closeScreen?.needsRun && (
           <div className="source-notice" role="status">
-            <strong>昨夜尚未重跑</strong>
+            <strong>精选尚未重跑</strong>
             <span>
               {closeScreen.items.length
-                ? `下列是 ${closeScreen.asOfDate || '上次'} 的清单，不能当作下一交易日计划。`
-                : '还没有今夜的五项全过清单。'}
+                ? `下列是 ${closeScreen.asOfDate || '上次'} 的清单，不能当作当前计划。`
+                : '还没有当前交易日的五项全过清单。'}
             </span>
           </div>
         )}

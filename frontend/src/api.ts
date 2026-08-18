@@ -19,7 +19,29 @@ import type {
 } from './types'
 
 export const tapeClosed = (code?: string) =>
-  code === 'after_close' || code === 'weekend' || code === 'preopen'
+  code === 'after_close' || code === 'weekend' || code === 'preopen' || code === 'auction'
+
+export const afterCloseSession = (code?: string) =>
+  code === 'after_close' || code === 'weekend'
+
+export const beforeOpen = (code?: string) =>
+  code === 'preopen' || code === 'auction'
+
+export const chinaClock = () =>
+  new Date().toLocaleTimeString('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+
+export const nearSessionFlip = () => {
+  const hm = chinaClock()
+  return (hm >= '09:14' && hm < '09:35') || (hm >= '14:58' && hm < '15:05')
+}
+
+export const sessionLooksStuck = (code?: string) =>
+  (code === 'preopen' || code === 'auction') && chinaClock() >= '09:30' && chinaClock() < '15:00'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') || '/api'
 type JsonObject = Record<string, unknown>
@@ -387,6 +409,16 @@ function invalidateToday() {
   todayCache = null
 }
 
+function todayCacheTtl(code: string) {
+  const hm = chinaClock()
+  if (code === 'preopen' && hm >= '09:15') return 0
+  if (code === 'auction' && hm >= '09:30') return 0
+  if (code === 'lunch' && hm >= '13:00') return 0
+  if (code === 'open' && hm >= '11:30' && hm < '13:00') return 0
+  if (code === 'open' && hm >= '15:00') return 0
+  return 30_000
+}
+
 function normalizeToday(value: unknown): TodayBriefing {
   const raw = objectFrom(value)
   const session = objectFrom(raw.session)
@@ -445,7 +477,8 @@ function normalizeToday(value: unknown): TodayBriefing {
 
 export const api = {
   async today(force = false): Promise<TodayBriefing> {
-    if (!force && todayCache && Date.now() - todayCache.at < 30_000) return todayCache.data
+    const ttl = todayCache ? todayCacheTtl(todayCache.data.session.code) : 30_000
+    if (!force && todayCache && Date.now() - todayCache.at < ttl) return todayCache.data
     const data = normalizeToday(await request<unknown>('/today'))
     todayCache = { at: Date.now(), data }
     return data

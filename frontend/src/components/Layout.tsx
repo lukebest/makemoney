@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { api, tapeClosed } from '../api'
+import { api, nearSessionFlip, tapeClosed } from '../api'
 import type { SessionStatus } from '../types'
 
 const links = [
@@ -31,8 +31,15 @@ export function Layout() {
     load()
     void api.market().catch(() => undefined)
     void api.mainline().catch(() => undefined)
-    const retry = window.setTimeout(load, 4000)
-    const timer = window.setInterval(load, 60_000)
+    const retry = window.setTimeout(() => load(), 4000)
+    const timer = window.setInterval(() => {
+      void api.today(nearSessionFlip()).then((brief) => {
+        setSession(brief.session)
+        if (!tapeClosed(brief.session.code)) {
+          void api.preferred().catch(() => undefined)
+        }
+      }).catch(() => undefined)
+    }, 15_000)
     return () => {
       window.clearTimeout(retry)
       window.clearInterval(timer)

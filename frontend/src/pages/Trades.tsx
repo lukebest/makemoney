@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage, tapeClosed } from '../api'
+import { api, errorMessage, sessionLooksStuck, tapeClosed } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Button, PageHeader, Panel, StatusView } from '../components/ui'
 import type { SessionStatus, Trade, TradeInput, TradeSide } from '../types'
@@ -12,7 +12,7 @@ const nowLocal = () => {
 
 const sessionStamp = (side: TradeSide, session?: SessionStatus) => {
   if (!session || !tapeClosed(session.code)) return nowLocal()
-  if (side === 'sell' && session.code !== 'preopen' && session.asOfDate) {
+  if (side === 'sell' && (session.code === 'after_close' || session.code === 'weekend') && session.asOfDate) {
     return `${session.asOfDate}T15:00`
   }
   if (session.forDate) return `${session.forDate}T09:30`
@@ -51,7 +51,7 @@ export function Trades() {
     && trendCheckedCode === normalizedCode
   const staleListWarning = params.get('list') === 'stale' && side === 'buy'
     && normalizedCode === (params.get('code') || '').replace(/\D/g, '')
-    ? '今夜精选尚未重跑，这只来自上次清单'
+    ? '精选尚未重跑，这只来自上次清单'
     : ''
 
   const load = useCallback(async () => {
@@ -71,6 +71,21 @@ export function Trades() {
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [])
+  useEffect(() => {
+    if (!sessionLooksStuck(session?.code)) return
+    const timer = window.setInterval(() => {
+      void api.today(true).then((brief) => {
+        setSession(brief.session)
+        setForm((current) => {
+          const autoStamp = /T(?:09:30|15:00)$/.test(current.tradedAt)
+          if (!autoStamp) return current
+          const stamp = sessionStamp(current.side, brief.session)
+          return current.tradedAt === stamp ? current : { ...current, tradedAt: stamp }
+        })
+      }).catch(() => undefined)
+    }, 15_000)
+    return () => window.clearInterval(timer)
+  }, [session?.code])
   useEffect(() => {
     const code = (params.get('code') || '').replace(/\D/g, '')
     if (code.length < 5) return

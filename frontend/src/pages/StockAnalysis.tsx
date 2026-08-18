@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage, tapeClosed } from '../api'
+import { api, errorMessage, sessionLooksStuck, tapeClosed } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
@@ -106,6 +106,19 @@ export function StockAnalysis() {
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [activeCode])
+  useEffect(() => {
+    if (!sessionLooksStuck(session?.code)) return
+    const timer = window.setInterval(() => {
+      if (!sessionLooksStuck(session?.code)) return
+      void api.today(true).then((brief) => {
+        setSession(brief.session)
+        const stop = brief.stops.find((item) => item.code === activeCode)
+        setStopExit(stop ? { price: stop.livePrice, quantity: stop.quantity } : undefined)
+        if (!tapeClosed(brief.session.code) && activeCode) void analyze(activeCode)
+      }).catch(() => undefined)
+    }, 15_000)
+    return () => window.clearInterval(timer)
+  }, [activeCode, analyze, session?.code])
 
   const chartOption = useMemo<EChartsOption>(() => {
     if (!data?.klines?.length) return {}
