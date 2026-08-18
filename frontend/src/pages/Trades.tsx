@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage, sessionLooksStuck, tapeClosed } from '../api'
+import { afterCloseSession, api, errorMessage, sessionLooksStuck, tapeClosed } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Button, PageHeader, Panel, StatusView } from '../components/ui'
 import type { SessionStatus, Trade, TradeInput, TradeSide } from '../types'
@@ -154,9 +154,11 @@ export function Trades() {
         : (brief.discipline?.planCodes ?? [])
       const hasPlan = codes.length > 0
       setListWarning(
-        hasPlan && !codes.includes(normalized)
-          ? '该股不在当日精选清单，记录后将记为纪律违例'
-          : '',
+        brief.closeScreen.needsRun && !afterCloseSession(brief.session.code)
+          ? '今日精选尚未生成，这只无法按当日清单核对'
+          : hasPlan && !codes.includes(normalized)
+            ? '该股不在当日精选清单，记录后将记为纪律违例'
+            : '',
       )
     }).catch(() => undefined)
     return () => {
