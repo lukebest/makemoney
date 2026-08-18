@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage } from '../api'
+import { api, errorMessage, tapeClosed } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
-import type { KlineBar, PreferredStock, StockAnalysis as StockAnalysisData } from '../types'
+import type { KlineBar, PreferredStock, SessionStatus, StockAnalysis as StockAnalysisData } from '../types'
 
 const ma = (bars: KlineBar[], days: number) =>
   bars.map((bar, index) => {
@@ -20,6 +20,9 @@ export function StockAnalysis() {
   const [code, setCode] = useState('')
   const [data, setData] = useState<StockAnalysisData>()
   const [picks, setPicks] = useState<PreferredStock[]>([])
+  const [stalePicks, setStalePicks] = useState(false)
+  const [stopExit, setStopExit] = useState<{ price: number; quantity?: number }>()
+  const [session, setSession] = useState<SessionStatus>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -59,9 +62,27 @@ export function StockAnalysis() {
     }
   }, [analyze, params])
   useEffect(() => {
-    void api.closeScreen()
-      .then((screen) => setPicks(screen.items))
-      .catch(() => undefined)
+    let cancelled = false
+    const loadPicks = async () => {
+      try {
+        const screen = await api.closeScreen()
+        if (cancelled) return
+        setPicks(screen.items)
+        setStalePicks(Boolean(screen.needsRun))
+        if (screen.job?.status === 'running') {
+          window.setTimeout(() => { void loadPicks() }, 1500)
+        }
+      } catch {
+        /* keep last list */
+      }
+    }
+    void loadPicks()
+    const onFocus = () => { void loadPicks() }
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', onFocus)
+    }
   }, [])
   const pickIndex = picks.findIndex((item) => item.code === (data?.code || params.get('code')))
   const prevPick = pickIndex > 0 ? picks[pickIndex - 1] : undefined
@@ -69,6 +90,22 @@ export function StockAnalysis() {
   useEffect(() => {
     if (nextPick) void api.stock(nextPick.code).catch(() => undefined)
   }, [nextPick])
+  const activeCode = data?.code || params.get('code') || ''
+  useEffect(() => {
+    if (!activeCode) {
+      setStopExit(undefined)
+      return
+    }
+    setStopExit(undefined)
+    let cancelled = false
+    void api.today().then((brief) => {
+      if (cancelled) return
+      setSession(brief.session)
+      const stop = brief.stops.find((item) => item.code === activeCode)
+      if (stop) setStopExit({ price: stop.livePrice, quantity: stop.quantity })
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [activeCode])
 
   const chartOption = useMemo<EChartsOption>(() => {
     if (!data?.klines?.length) return {}
@@ -129,7 +166,7 @@ export function StockAnalysis() {
           {prevPick
             ? <Link to={`/stock?code=${prevPick.code}`}>上一只 {prevPick.name}</Link>
             : <span>清单起点</span>}
-          <strong>精选 {pickIndex + 1} / {picks.length}</strong>
+          <strong>{stalePicks ? '上次精选' : '精选'} {pickIndex + 1} / {picks.length}</strong>
           {nextPick
             ? <Link to={`/stock?code=${nextPick.code}`}>下一只 {nextPick.name}</Link>
             : <span>清单末只</span>}
@@ -171,7 +208,7 @@ export function StockAnalysis() {
           )}
           <section className="stock-ticker">
             <div><p>{data.code}{data.market === 'HK' ? ' · 港股' : ''}</p><h2>{data.name}</h2></div>
-            <Metric label={`现价 · ${data.currency || 'CNY'}`} value={Number(data.price).toFixed(2)} />
+            <Metric label={`${tapeClosed(session?.code) ? '收盘' : '现价'} · ${data.currency || 'CNY'}`} value={Number(data.price).toFixed(2)} />
             <Metric label="涨跌幅" value={percent(data.change)} tone={data.change >= 0 ? 'gain' : 'loss'} />
             <Metric label="趋势判定" value={data.trend || '待确认'} note={data.score != null ? `强度 ${data.score}` : undefined} />
           </section>
@@ -233,11 +270,19 @@ export function StockAnalysis() {
                   run={() => api.aiInterpret(data.code)}
                 />
               )}
+              {stopExit && (
+                <Link
+                  className="button trade-handoff"
+                  to={`/trades?side=sell&code=${encodeURIComponent(data.code)}&name=${encodeURIComponent(data.name)}&price=${stopExit.price}&quantity=${stopExit.quantity ?? ''}&reason=${encodeURIComponent('止损')}`}
+                >
+                  止损已触发 · 记卖出
+                </Link>
+              )}
               <Link
                 className="button button-ghost trade-handoff"
-                to={`/trades?code=${encodeURIComponent(data.code)}&name=${encodeURIComponent(data.name)}&price=${data.price}&stop=${data.support || ''}`}
+                to={`/trades?code=${encodeURIComponent(data.code)}&name=${encodeURIComponent(data.name)}&price=${data.price}&stop=${data.support || ''}${stalePicks ? '&list=stale' : ''}`}
               >
-                记入交易台
+                {stalePicks ? '上次精选 · 记入交易台' : '记入交易台'}
               </Link>
             </Panel>
             <Panel title="入场检查" eyebrow="DISCIPLINE CHECK">

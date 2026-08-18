@@ -2,7 +2,14 @@ import time
 
 from fastapi.testclient import TestClient
 
-from backend.main import create_app
+from backend.main import (
+    _close_screen_needs_run,
+    _resume_interrupted_close_job,
+    _session_review_date,
+    _tape_closed,
+    _today_discipline,
+    create_app,
+)
 
 
 class DummyCache:
@@ -194,6 +201,31 @@ def test_health_settings_and_cors(tmp_path):
         assert "action" in briefing.json()["session"]
         assert "needs_run" in briefing.json()["close_screen"]
         assert briefing.json()["close_screen"]["job"]["status"] == "done"
+        saved_job = client.app.state.db.get_snapshot("close-screen-job")
+        assert saved_job["status"] == "done"
+        client.app.state.close_screen_job = None
+        assert client.get("/api/today").json()["close_screen"]["job"]["status"] == "done"
+
+
+def test_stock_snapshot_is_current_when_tape_closed(tmp_path):
+    with make_client(tmp_path) as client:
+        session = client.get("/api/today").json()["session"]
+        as_of = session["as_of_date"]
+        client.app.state.db.save_snapshot(
+            "stock:600519:120",
+            {
+                "code": "600519",
+                "name": "贵州茅台",
+                "klines": [{"date": as_of, "open": 1, "close": 2, "high": 3, "low": 1, "volume": 10}],
+                "source": "akshare",
+            },
+        )
+        payload = client.get("/api/stocks/600519").json()
+        assert payload["klines"][0]["date"] == as_of
+        if _tape_closed(session):
+            assert payload.get("stale") is not True
+        else:
+            assert payload["stale"] is True
 
 
 def test_stock_serves_snapshot_when_cache_cold(tmp_path):
@@ -280,8 +312,76 @@ def test_close_screen_needs_run_when_saved_as_of_is_stale(tmp_path):
         briefing = client.get("/api/today").json()
         saved = client.get("/api/market/preferred/close-screen").json()
         assert saved["needs_run"] == briefing["close_screen"]["needs_run"]
-        if briefing["session"]["code"] in ("after_close", "weekend"):
+        if _tape_closed(briefing["session"]):
             assert briefing["close_screen"]["needs_run"] is True
+
+
+def test_preopen_keeps_last_session_review_and_close_quotes():
+    session = {
+        "code": "preopen",
+        "as_of_date": "2026-08-17",
+        "for_date": "2026-08-18",
+    }
+    assert _tape_closed(session) is True
+    assert _session_review_date(session) == "2026-08-17"
+    assert _close_screen_needs_run(session, {"as_of_date": "2026-08-16"}) is True
+    assert _close_screen_needs_run(session, {"as_of_date": "2026-08-17"}) is False
+
+
+def test_preopen_discipline_keeps_previous_session_exits():
+    session = {
+        "code": "preopen",
+        "as_of_date": "2026-08-17",
+        "for_date": "2026-08-18",
+    }
+
+    class FakeDB:
+        def get_close_screen(self, for_date=None):
+            if for_date == "2026-08-18":
+                return {"items": [{"code": "600519", "name": "贵州茅台"}]}
+            return None
+
+        def list_trades(self, limit=200):
+            return [
+                {
+                    "code": "000001",
+                    "name": "平安银行",
+                    "side": "sell",
+                    "note": "止损",
+                    "traded_at": "2026-08-17T15:10:00+08:00",
+                },
+                {
+                    "code": "000002",
+                    "name": "万科A",
+                    "side": "buy",
+                    "logic": "开盘前补记",
+                    "traded_at": "2026-08-18T00:10:00+08:00",
+                },
+            ]
+
+    result = _today_discipline(FakeDB(), session)
+    assert result["exits"][0]["code"] == "000001"
+    assert result["off_list"][0]["code"] == "000002"
+    assert result["has_plan"] is True
+    assert "600519" in result["plan_codes"]
+
+
+def test_stale_running_close_job_is_resumed(tmp_path):
+    with make_client(tmp_path) as client:
+        client.app.state.db.save_snapshot(
+            "close-screen-job",
+            {"status": "running", "checked": 4, "total": 20, "matches": 1},
+        )
+        client.app.state.close_screen_job = None
+        assert _resume_interrupted_close_job(client.app) is True
+        payload = {"job": {"status": "running"}}
+        for _ in range(40):
+            payload = client.get("/api/market/preferred/close-screen").json()
+            if payload.get("job", {}).get("status") != "running":
+                break
+            time.sleep(0.05)
+        assert payload["job"]["status"] == "done"
+        assert payload["items"][0]["code"] == "600519"
 
 
 def test_today_attaches_live_change_when_spot_is_warm(tmp_path):
@@ -310,6 +410,87 @@ def test_today_attaches_live_change_when_spot_is_warm(tmp_path):
         assert pick["code"] == "600519"
         assert pick["live_price"] == 8.0
         assert pick["live_change_pct"] == -1.0
+
+
+def test_today_uses_daily_snapshot_for_picks_when_spot_cold(tmp_path):
+    with make_client(tmp_path) as client:
+        session = client.get("/api/today").json()["session"]
+        client.app.state.db.save_close_screen(
+            {
+                "items": [
+                    {"code": "600519", "name": "贵州茅台", "score": 100, "change_pct": 3.2}
+                ],
+                "as_of_date": "2020-01-01",
+                "for_date": session["for_date"],
+                "match_count": 1,
+            }
+        )
+        client.app.state.db.save_snapshot(
+            "stock:600519:120",
+            {
+                "code": "600519",
+                "source": "akshare",
+                "klines": [
+                    {"date": "2019-12-31", "open": 10, "close": 10, "high": 10, "low": 10, "volume": 1},
+                    {
+                        "date": session["as_of_date"],
+                        "open": 10,
+                        "close": 12,
+                        "high": 12,
+                        "low": 10,
+                        "volume": 2,
+                        "change_pct": 20.0,
+                    },
+                ],
+            },
+        )
+        pick = client.get("/api/today").json()["close_screen"]["items"][0]
+        assert pick["code"] == "600519"
+        if _tape_closed(session):
+            assert pick["live_price"] == 12.0
+            assert pick["live_change_pct"] == 20.0
+        else:
+            assert pick.get("live_change_pct") is None
+
+
+def test_today_uses_older_daily_close_when_as_of_bar_missing(tmp_path):
+    with make_client(tmp_path) as client:
+        session = client.get("/api/today").json()["session"]
+        client.app.state.db.save_close_screen(
+            {
+                "items": [
+                    {"code": "600519", "name": "贵州茅台", "score": 100, "change_pct": 3.2}
+                ],
+                "as_of_date": "2020-01-01",
+                "for_date": session["for_date"],
+                "match_count": 1,
+            }
+        )
+        client.app.state.db.save_snapshot(
+            "stock:600519:120",
+            {
+                "code": "600519",
+                "source": "akshare",
+                "klines": [
+                    {
+                        "date": "2019-12-31",
+                        "open": 10,
+                        "close": 11,
+                        "high": 12,
+                        "low": 9,
+                        "volume": 1,
+                        "change_pct": 4.0,
+                    },
+                ],
+            },
+        )
+        pick = client.get("/api/today").json()["close_screen"]["items"][0]
+        assert pick["code"] == "600519"
+        if _tape_closed(session):
+            assert pick["live_price"] == 11.0
+            assert pick["live_change_pct"] == 4.0
+        else:
+            assert pick.get("live_change_pct") is None
 
 
 def test_positions_status_uses_saved_quotes_when_spot_cold(tmp_path):
@@ -355,6 +536,55 @@ def test_today_reads_stop_alerts_from_saved_quotes(tmp_path):
         briefing = client.get("/api/today").json()
         assert briefing["position_count"] == 1
         assert briefing["stops"][0]["code"] == "000001"
+        assert briefing["stops"][0]["quantity"] == 100
+
+
+def test_today_stop_prefers_daily_close_over_midday_snapshot(tmp_path):
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/positions",
+            json={
+                "code": "000001",
+                "name": "平安银行",
+                "quantity": 100,
+                "avg_price": 10,
+                "stop_loss": 9,
+            },
+        )
+        assert created.status_code == 201
+        session = client.get("/api/today").json()["session"]
+        client.app.state.db.save_snapshot(
+            "position-quotes",
+            {"000001": {"price": 10.0, "change_pct": 0.0, "source": "akshare"}},
+        )
+        client.app.state.db.save_snapshot(
+            "stock:000001:120",
+            {
+                "code": "000001",
+                "source": "akshare",
+                "klines": [
+                    {
+                        "date": session["as_of_date"],
+                        "open": 10,
+                        "close": 8,
+                        "high": 10,
+                        "low": 8,
+                        "volume": 2,
+                        "change_pct": -20.0,
+                    }
+                ],
+            },
+        )
+        briefing = client.get("/api/today").json()
+        status = client.get("/api/positions/status").json()
+        if _tape_closed(session):
+            assert briefing["stops"][0]["code"] == "000001"
+            assert briefing["stops"][0]["live_price"] == 8.0
+            assert status["items"][0]["live_price"] == 8.0
+            assert status["items"][0]["stop_triggered"] is True
+        else:
+            assert briefing["stops"] == []
+            assert status["items"][0]["live_price"] == 10.0
 
 
 def test_hong_kong_connect_buy_allows_non_a_share_lot(tmp_path):
@@ -378,6 +608,41 @@ def test_hong_kong_connect_buy_allows_non_a_share_lot(tmp_path):
         assert trade["code"] == "00700"
         assert trade["currency"] == "HKD"
         assert trade["fx_rate"] == 0.87
+
+
+def test_create_journal_keeps_submitted_created_at(tmp_path):
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/journal",
+            json={
+                "title": "2026-08-17 收盘复盘",
+                "content": "开盘前补记昨夜",
+                "created_at": "2026-08-17T16:00:00+08:00",
+            },
+        )
+        assert created.status_code == 201
+        assert created.json()["created_at"].startswith("2026-08-17T16:00")
+
+
+def test_create_trade_keeps_submitted_traded_at(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post(
+            "/api/trades",
+            json={
+                "code": "600519",
+                "name": "贵州茅台",
+                "side": "buy",
+                "quantity": 100,
+                "price": 10,
+                "logic": "补记昨夜成交",
+                "funds_confirmed": True,
+                "space_confirmed": True,
+                "stop_loss": 9,
+                "traded_at": "2026-08-17T15:00:00+08:00",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["trade"]["traded_at"].startswith("2026-08-17T15:00")
 
 
 def test_position_limit_error_explains_cost_and_limit(tmp_path):
@@ -427,6 +692,25 @@ def test_buy_requires_discipline_and_updates_review(tmp_path):
             },
         )
         assert bought.status_code == 201
+        session = client.get("/api/today").json()["session"]
+        client.app.state.db.save_snapshot(
+            "stock:600519:120",
+            {
+                "code": "600519",
+                "source": "akshare",
+                "klines": [
+                    {
+                        "date": session["as_of_date"],
+                        "open": 10,
+                        "close": 8,
+                        "high": 10,
+                        "low": 8,
+                        "volume": 1,
+                        "change_pct": -20.0,
+                    }
+                ],
+            },
+        )
         status_response = client.get("/api/positions/status").json()
         assert status_response["items"][0]["quantity"] == 100
         assert status_response["items"][0]["stop_triggered"] is True
@@ -443,6 +727,8 @@ def test_buy_requires_discipline_and_updates_review(tmp_path):
             },
         )
         assert sold.status_code == 201
+        exits = client.get("/api/today").json()["discipline"]["exits"]
+        assert exits[0]["code"] == "600519"
         review = client.get("/api/review/stats").json()
         assert review["win_rate"] == 1.0
         assert review["realized_pnl"] == 200.0

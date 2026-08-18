@@ -206,7 +206,7 @@ export interface TodayBriefing {
     items: PreferredStock[]
     job?: CloseScreenJob
   }
-  stops: Array<{ code: string; name: string; livePrice: number; stopLoss: number; message: string }>
+  stops: Array<{ code: string; name: string; livePrice: number; stopLoss: number; quantity?: number; message: string }>
   positionCount: number
   hasJournal?: boolean
   discipline?: {
@@ -216,6 +216,8 @@ export interface TodayBriefing {
     buyCount: number
     offList: Array<{ code: string; name: string; onList?: boolean }>
     planCodes?: string[]
+    reviewPlanCodes?: string[]
+    exits?: Array<{ code: string; name: string; note?: string }>
   }
 }
 
@@ -252,6 +254,7 @@ export interface Position {
   marketValue?: number
   costValue?: number
   unrealizedPnl?: number
+  priceSource?: string
 }
 
 export interface PositionInput {

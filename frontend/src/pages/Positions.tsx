@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
-import { api, errorMessage } from '../api'
+import { Link } from 'react-router-dom'
+import { api, errorMessage, tapeClosed } from '../api'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, money, percent } from '../components/ui'
 import type { PortfolioSummary, Position, PositionInput, Settings } from '../types'
@@ -19,17 +20,24 @@ export function Positions() {
   const [error, setError] = useState('')
   const [formError, setFormError] = useState('')
   const [stale, setStale] = useState(false)
+  const [overnight, setOvernight] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const [positionData, settingData] = await Promise.all([api.positionStatus(), api.settings()])
+      const [positionData, settingData, brief] = await Promise.all([
+        api.positionStatus(),
+        api.settings(),
+        api.today().catch(() => undefined),
+      ])
+      const closed = tapeClosed(brief?.session.code)
+      setOvernight(closed)
       setPositions(positionData.items)
       setPortfolio(positionData.summary)
       setSettings(settingData)
       setStale(Boolean(positionData.stale))
-      if (positionData.stale) {
+      if (positionData.stale && !closed) {
         window.setTimeout(() => {
           void api.positionStatus().then((fresh) => {
             if (fresh.stale) return
@@ -142,8 +150,12 @@ export function Positions() {
         <>
           {stale && (
             <div className="source-notice" role="status">
-              <strong>报价刷新中</strong>
-              <span>先按上次行情估算市值和止损，后台正在拉取最新报价。</span>
+              <strong>{overnight ? '已收盘' : '报价刷新中'}</strong>
+              <span>
+                {overnight
+                  ? '部分持仓还不是昨夜收盘，先按已有收盘或成本估算，不再拉取现价。'
+                  : '先按上次行情估算市值和止损，后台正在拉取最新报价。'}
+              </span>
             </div>
           )}
           <div className="capital-grid">
@@ -161,24 +173,57 @@ export function Positions() {
             <Panel title="三三四仓位结构" eyebrow="ALLOCATION"><Chart option={donutOption} className="donut-chart" ariaLabel="三三四仓位配置环形图" /></Panel>
           </div>
 
-          {stopAlerts.length > 0 && <div className="stop-alert" role="alert"><strong>止损线触发 · {stopAlerts.length} 只</strong><span>{stopAlerts.map((item) => item.name || item.code).join('、')} 已触及预设退出价，请按纪律处置。</span></div>}
+          {stopAlerts.length > 0 && (
+            <div className="stop-alert" role="alert">
+              <strong>止损线触发 · {stopAlerts.length} 只</strong>
+              <span>
+                {stopAlerts.map((item, index) => (
+                  <span key={item.code}>
+                    {index > 0 ? '、' : ''}
+                    <Link to={`/stock?code=${item.code}`}>{item.name || item.code}</Link>
+                  </span>
+                ))}
+                {' '}已触及预设退出价，
+                <Link
+                  to={`/trades?side=sell&code=${stopAlerts[0].code}&name=${encodeURIComponent(stopAlerts[0].name || stopAlerts[0].code)}&price=${stopAlerts[0].currentPrice}&quantity=${stopAlerts[0].quantity}&reason=${encodeURIComponent('止损')}`}
+                >
+                  记卖出
+                </Link>
+                。
+              </span>
+            </div>
+          )}
           {allocationWarnings.length > 0 && <div className="allocation-alert" role="alert"><strong>仓位纪律提醒</strong><span>{allocationWarnings.join('；')}。首次开仓永远不满仓，永远保留预备队。</span></div>}
 
           <Panel title={`当前持仓 · ${positions.length}`} eyebrow="OPEN POSITIONS">
             {!positions.length ? <StatusView state="empty" message="新增第一笔持仓，开始记录风险" /> : <div className="table-wrap"><table>
-              <thead><tr><th>标的</th><th>层级</th><th>数量</th><th>成本 / 现价</th><th>市值</th><th>盈亏</th><th>止损价</th><th><span className="sr-only">操作</span></th></tr></thead>
+              <thead><tr><th>标的</th><th>层级</th><th>数量</th><th>成本 / {positions.some((item) => item.priceSource === 'daily') ? '收盘' : '现价'}</th><th>市值</th><th>盈亏</th><th>止损价</th><th><span className="sr-only">操作</span></th></tr></thead>
               <tbody>{positions.map((p) => {
                 const itemPnl = p.unrealizedPnl ?? (p.currentPrice - p.costPrice) * p.quantity * (p.fxRate || 1)
                 const warning = p.stopPrice > 0 && p.currentPrice <= p.stopPrice
                 return <tr key={p.id} className={warning ? 'warning-row' : ''}>
-                  <td><b>{p.name || '未命名'}</b><small>{p.code}{p.market === 'HK' ? ' · 港股' : ''}</small></td>
+                  <td>
+                    <b><Link to={`/stock?code=${p.code}`}>{p.name || '未命名'}</Link></b>
+                    <small>{p.code}{p.market === 'HK' ? ' · 港股' : ''}{p.priceSource === 'daily' ? ' · 收盘' : ''}</small>
+                  </td>
                   <td><span className={`tier tier-${p.tier}`}>{p.tier === 1 ? '底仓' : '机动'}</span></td>
                   <td>{p.quantity.toLocaleString()}</td>
                   <td>{p.currency === 'HKD' ? 'HK$' : '¥'}{p.costPrice.toFixed(2)} <i>/</i> {p.currentPrice.toFixed(2)}</td>
                   <td>{money(p.marketValue ?? p.quantity * p.currentPrice * (p.fxRate || 1))}</td>
                   <td className={itemPnl >= 0 ? 'gain' : 'loss'}>{money(itemPnl)}</td>
                   <td className={warning ? 'gain' : ''}>{p.stopPrice.toFixed(2)}{warning && <small> 已触发</small>}</td>
-                  <td className="row-actions"><Button tone="ghost" onClick={() => beginEdit(p)}>编辑</Button><Button tone="danger" onClick={() => void remove(p)}>删除</Button></td>
+                  <td className="row-actions">
+                    {warning && (
+                      <Link
+                        className="button button-ghost"
+                        to={`/trades?side=sell&code=${p.code}&name=${encodeURIComponent(p.name || p.code)}&price=${p.currentPrice}&quantity=${p.quantity}&reason=${encodeURIComponent('止损')}`}
+                      >
+                        记卖出
+                      </Link>
+                    )}
+                    <Button tone="ghost" onClick={() => beginEdit(p)}>编辑</Button>
+                    <Button tone="danger" onClick={() => void remove(p)}>删除</Button>
+                  </td>
                 </tr>
               })}</tbody>
             </table></div>}

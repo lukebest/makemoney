@@ -18,6 +18,9 @@ import type {
   TradeInput,
 } from './types'
 
+export const tapeClosed = (code?: string) =>
+  code === 'after_close' || code === 'weekend' || code === 'preopen'
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') || '/api'
 type JsonObject = Record<string, unknown>
 
@@ -314,6 +317,7 @@ function normalizePosition(value: unknown): Position {
     marketValue: raw.market_value == null ? undefined : numberFrom(raw.market_value),
     costValue: numberFrom(raw.avg_price ?? raw.costPrice) * numberFrom(raw.quantity) * numberFrom(raw.fx_rate, 1),
     unrealizedPnl: raw.unrealized_pnl == null ? undefined : numberFrom(raw.unrealized_pnl),
+    priceSource: stringFrom(raw.price_source) || undefined,
   }
 }
 
@@ -411,6 +415,7 @@ function normalizeToday(value: unknown): TodayBriefing {
       name: stringFrom(item.name),
       livePrice: numberFrom(item.live_price),
       stopLoss: numberFrom(item.stop_loss),
+      quantity: item.quantity == null ? undefined : numberFrom(item.quantity),
       message: stringFrom(item.message),
     })),
     positionCount: numberFrom(raw.position_count),
@@ -427,6 +432,12 @@ function normalizeToday(value: unknown): TodayBriefing {
               onList: Boolean(item.on_list),
             })),
             planCodes: listFrom<string>(discipline.plan_codes, []),
+            reviewPlanCodes: listFrom<string>(discipline.review_plan_codes, []),
+            exits: listFrom<JsonObject>(discipline.exits, []).map((item) => ({
+              code: stringFrom(item.code),
+              name: stringFrom(item.name),
+              note: stringFrom(item.note) || undefined,
+            })),
           }
       : undefined,
   }
@@ -570,6 +581,9 @@ export const api = {
         note: trade.side === 'buy'
           ? `资金验证：${questions[1]}；上涨空间：${questions[2]}`
           : trade.reason,
+        traded_at: trade.tradedAt
+          ? new Date(trade.tradedAt).toISOString()
+          : undefined,
       }),
     }))
     invalidateToday()
@@ -588,7 +602,7 @@ export const api = {
       } satisfies JournalEntry
     })
   },
-  async saveJournal(entry: { id?: number; title: string; content: string }) {
+  async saveJournal(entry: { id?: number; title: string; content: string; createdAt?: string }) {
     const raw = objectFrom(
       entry.id
         ? await request<unknown>(`/journal/${entry.id}`, {
@@ -597,7 +611,12 @@ export const api = {
           })
         : await request<unknown>('/journal', {
             method: 'POST',
-            body: JSON.stringify({ title: entry.title, content: entry.content, tags: ['收盘'] }),
+            body: JSON.stringify({
+              title: entry.title,
+              content: entry.content,
+              tags: ['收盘'],
+              created_at: entry.createdAt,
+            }),
           }),
     )
     invalidateToday()

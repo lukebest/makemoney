@@ -158,7 +158,13 @@ class MarketService:
         as_of_date = last_completed_session()
         session_kind = "today_close" if after_close and as_of_date == china_today() else "previous_close"
 
-        spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
+        peeked = self.cache.peek("market:spot") if tape_is_closed() else None
+        if isinstance(peeked, dict) and peeked.get("items"):
+            spot = peeked
+        elif tape_is_closed():
+            spot = {"items": [], "source": "akshare", "fallback_reason": None}
+        else:
+            spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
         if spot["source"] == "sample":
             return {
                 "items": [],
@@ -562,7 +568,13 @@ class MarketService:
             fallback_reason = _safe_reason(exc)
 
         try:
-            spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
+            if tape_is_closed():
+                peeked = self.cache.peek("market:spot")
+                spot = peeked if isinstance(peeked, dict) and peeked.get("items") else None
+            else:
+                spot = self.cache.get_or_load("market:spot", 45, self._load_spot)
+            if not spot:
+                raise RuntimeError("closed tape; spot breadth unavailable")
             items = spot["items"]
             breadth = self._breadth(items)
             if spot["source"] == "sample":
@@ -645,7 +657,8 @@ class MarketService:
 
     def _load_mainline(self) -> dict[str, Any]:
         """Load detailed limit-up records and derive sectors/leader ladders."""
-        return self._load_mainline_from(date.today())
+        as_of = last_completed_session() if tape_is_closed() else china_today()
+        return self._load_mainline_from(as_of)
 
     def _load_mainline_from(self, as_of: date) -> dict[str, Any]:
         """Load the newest non-empty limit-up pool on or before as_of."""
@@ -932,6 +945,46 @@ class MarketService:
             )
         return result
 
+    def _warm_quote(self, code: str) -> dict[str, Any] | None:
+        peek = getattr(self.cache, "peek", None)
+        if not callable(peek):
+            return None
+        for key in ("market:spot", "market:hk:spot"):
+            blob = peek(key)
+            if not isinstance(blob, dict):
+                continue
+            for item in blob.get("items") or []:
+                if str(item.get("code")) == code:
+                    return item
+        return None
+
+    def _quote_from_daily_rows(self, code: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        last = rows[-1]
+        previous = rows[-2] if len(rows) >= 2 else {}
+        close = float(last.get("close") or 0)
+        prev_close = float(previous.get("close") or 0)
+        change_pct = last.get("change_pct")
+        if change_pct is None and prev_close:
+            change_pct = round((close / prev_close - 1) * 100, 3)
+        cached = self.cache.peek(f"daily:{code}:120") if hasattr(self.cache, "peek") else None
+        name = str((cached or {}).get("name") or code)
+        return {
+            "code": code,
+            "name": name,
+            "price": close,
+            "change": close - prev_close if prev_close else 0,
+            "change_pct": float(change_pct or 0),
+            "source": "daily",
+            "market": "HK" if is_hk_code(code) else "A",
+            "currency": "HKD" if is_hk_code(code) else "CNY",
+        }
+
+    def _quote_for_daily(self, code: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """Attach a price without loading the full spot tape after the close."""
+        if rows and tape_is_closed():
+            return self._warm_quote(code) or self._quote_from_daily_rows(code, rows)
+        return self.quotes([code])[code]
+
     def _load_stock_daily(self, code: str, days: int) -> dict[str, Any]:
         fallback_reason: str | None = None
         rows: list[dict[str, Any]] = []
@@ -941,7 +994,7 @@ class MarketService:
         except Exception as exc:
             fallback_reason = _safe_reason(exc)
 
-        quote = self.quotes([code])[code]
+        quote = self._quote_for_daily(code, rows)
         if not rows:
             # New listings often have a live quote before daily history APIs catch up.
             # Prefer a single real session bar over inventing multi-day sample candles.
@@ -1305,6 +1358,11 @@ def session_status(now: datetime | None = None) -> dict[str, Any]:
         "for_date": for_date.isoformat(),
         "clock": current.strftime("%H:%M"),
     }
+
+
+def tape_is_closed(now: datetime | None = None) -> bool:
+    """No live A-share tape: after close, weekend, or preopen before 09:15."""
+    return session_status(now).get("code") in {"after_close", "weekend", "preopen"}
 
 
 def last_completed_session(now: datetime | None = None) -> date:

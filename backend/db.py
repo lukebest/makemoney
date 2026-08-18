@@ -404,7 +404,7 @@ class Database:
                     values.get("market", position.get("market") if position else "A"),
                     values.get("currency", position.get("currency") if position else "CNY"),
                     fx_rate,
-                    now,
+                    values.get("traded_at") or now,
                 ),
             )
             row = connection.execute(
@@ -492,7 +492,7 @@ class Database:
                     values.get("mood", ""),
                     json.dumps(values.get("tags", []), ensure_ascii=False),
                     values.get("trade_id"),
-                    now,
+                    values.get("created_at") or now,
                     now,
                 ),
             )

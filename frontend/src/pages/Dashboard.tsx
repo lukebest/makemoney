@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, errorMessage } from '../api'
+import { api, errorMessage, tapeClosed } from '../api'
 import { Metric, PageHeader, Panel, StatusView, percent } from '../components/ui'
 import type { MarketMainline, MarketOverview, MarketPhase, TodayBriefing } from '../types'
 
@@ -16,12 +16,10 @@ export function Dashboard() {
   const [mainline, setMainline] = useState<MarketMainline>()
   const [briefing, setBriefing] = useState<TodayBriefing>()
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
-    setLoading(true)
     setError('')
-    const todayP = api.today().then(setBriefing).catch(() => undefined)
+    void api.today().then(setBriefing).catch(() => undefined)
     try {
       const [market, line] = await Promise.all([
         api.market(),
@@ -29,8 +27,7 @@ export function Dashboard() {
       ])
       setData(market)
       setMainline(line)
-      await todayP
-    } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
+    } catch (e) { setError(errorMessage(e)) }
   }, [])
 
   useEffect(() => { void load() }, [load])
@@ -48,6 +45,11 @@ export function Dashboard() {
     }, 1500)
     return () => window.clearInterval(timer)
   }, [scanJob?.status])
+  const startTonightScan = () => {
+    void api.startCloseScreen()
+      .then(() => api.today(true).then(setBriefing))
+      .catch(() => undefined)
+  }
 
   return (
     <div className="page">
@@ -55,7 +57,15 @@ export function Dashboard() {
         eyebrow="MARKET TEMPERATURE · 市场体感"
         title="先观四时，再落一子"
         description="市场有温度，仓位有分寸。让趋势决定进退，不让情绪代替判断。"
-        actions={data?.updatedAt && <span className="asof">更新于 {new Date(data.updatedAt).toLocaleTimeString('zh-CN')}</span>}
+        actions={(data?.boardDate || briefing?.session.asOfDate || data?.updatedAt) && (
+          <span className="asof">
+            {tapeClosed(briefing?.session.code) && (data?.boardDate || briefing?.session.asOfDate)
+              ? `截至 ${data?.boardDate || briefing?.session.asOfDate} 收盘`
+              : data?.updatedAt
+                ? `更新于 ${new Date(data.updatedAt).toLocaleTimeString('zh-CN')}`
+                : null}
+          </span>
+        )}
       />
       {briefing && (
         <section className="daily-brief" aria-label="今日行动">
@@ -65,8 +75,25 @@ export function Dashboard() {
           </div>
           <ol>
             {briefing.stops.length ? briefing.stops.slice(0, 2).map((stop) => (
-              <li key={stop.code}><b>止损</b><Link to={`/stock?code=${stop.code}`}>{stop.name}</Link> 已触发</li>
+              <li key={stop.code}>
+                <b>止损</b>
+                <Link to={`/stock?code=${stop.code}`}>{stop.name}</Link>
+                已触发
+                <Link
+                  to={`/trades?side=sell&code=${stop.code}&name=${encodeURIComponent(stop.name)}&price=${stop.livePrice}&quantity=${stop.quantity ?? ''}&reason=${encodeURIComponent('止损')}`}
+                >
+                  记卖出
+                </Link>
+              </li>
             )) : <li><b>止损</b>{briefing.positionCount ? '持仓暂无触发' : '当前空仓'}</li>}
+            {briefing.discipline?.exits?.length ? (
+              <li>
+                <b>卖出</b>
+                {briefing.discipline.exits.slice(0, 3).map((item) => (
+                  <Link key={item.code} to="/review">{item.name}{item.note ? ` · ${item.note}` : ''}</Link>
+                ))}
+              </li>
+            ) : null}
             {briefing.discipline?.offList.length ? (
               <li>
                 <b>纪律</b>
@@ -89,10 +116,13 @@ export function Dashboard() {
             ) : briefing.closeScreen.needsRun && (
               <li>
                 <b>今晚</b>
-                <Link to="/preferred?run=1">收盘已过，运行今晚精选</Link>
+                <button type="button" className="brief-action" onClick={startTonightScan}>
+                  {briefing.session.code === 'preopen' ? '开盘前，先完成昨夜精选' : '收盘已过，运行今晚精选'}
+                </button>
+                <Link to="/preferred">看清单</Link>
               </li>
             )}
-            {(briefing.session.code === 'after_close' || briefing.session.code === 'weekend') && !briefing.hasJournal && (
+            {tapeClosed(briefing.session.code) && !briefing.hasJournal && (
               <li>
                 <b>复盘</b>
                 <Link to="/review">写下今日一笔</Link>
@@ -109,12 +139,14 @@ export function Dashboard() {
                     )}
                   </Link>
                 ))
-                : <Link to="/preferred">尚未生成，去收盘筛选</Link>}
+                : briefing.closeScreen.needsRun
+                  ? <Link to="/preferred">尚未生成，去收盘筛选</Link>
+                  : <Link to="/preferred">今晚五项全过 0 只</Link>}
             </li>
           </ol>
         </section>
       )}
-      {loading ? <StatusView state="loading" /> : error ? <StatusView state="error" message={error} onRetry={load} /> : !data ? <StatusView state="empty" /> : (
+      {error && !data ? <StatusView state="error" message={error} onRetry={load} /> : !data ? <StatusView state="loading" /> : (
         <>
           {data.source === 'sample' && (
             <div className="source-notice" role="status">
@@ -156,7 +188,7 @@ export function Dashboard() {
             {mainline?.source === 'akshare' && mainline.sectors.length ? (
               <div className="mainline-layout">
                 <div className="mainline-answer">
-                  <span>今日主线</span>
+                  <span>{tapeClosed(briefing?.session.code) && mainline.date ? `${mainline.date} 收盘主线` : '今日主线'}</span>
                   <strong>{mainline.mainSector || '待确认'}</strong>
                   <small>
                     {mainline.activeSectors.length
@@ -182,11 +214,20 @@ export function Dashboard() {
                       <b>{ladder.boardCount} 板</b>
                       <p>{ladder.stocks.slice(0, 6).map((stock) => `${stock.name}（${stock.sector}）`).join(' · ')}</p>
                     </div>
-                  )) : <p>今日暂无二板及以上股票，龙头尚未确认。</p>}
+                  )) : (
+                    <p>
+                      {tapeClosed(briefing?.session.code) && mainline.date
+                        ? `${mainline.date} 收盘暂无二板及以上，龙头尚未确认。`
+                        : '今日暂无二板及以上股票，龙头尚未确认。'}
+                    </p>
+                  )}
                 </div>
               </div>
             ) : (
-              <StatusView state="empty" message={mainline?.fallbackReason || '今日涨停明细暂不可用'} />
+              <StatusView
+                state="empty"
+                message={mainline?.fallbackReason || (tapeClosed(briefing?.session.code) ? '收盘涨停明细暂不可用' : '今日涨停明细暂不可用')}
+              />
             )}
           </Panel>
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage } from '../api'
+import { api, errorMessage, tapeClosed } from '../api'
 import { Button, PageHeader, Panel, StatusView, percent } from '../components/ui'
 import type { CloseScreenData, PreferredStock, PreferredStocksData } from '../types'
 
@@ -10,7 +10,7 @@ const amount = (value: number) => {
   return value.toFixed(0)
 }
 
-function StockCards({ stocks, label }: { stocks: PreferredStock[]; label: string }) {
+function StockCards({ stocks, label, stale }: { stocks: PreferredStock[]; label: string; stale?: boolean }) {
   if (!stocks.length) {
     return <StatusView state="empty" message="当前没有通过数据验证的候选，请稍后再试" />
   }
@@ -49,9 +49,9 @@ function StockCards({ stocks, label }: { stocks: PreferredStock[]; label: string
               <Link className="button button-ghost" to={`/stock?code=${stock.code}`}>打开个股诊断</Link>
               <Link
                 className="button button-ghost"
-                to={`/trades?code=${encodeURIComponent(stock.code)}&name=${encodeURIComponent(stock.name)}&price=${stock.price}&stop=${stock.stopLoss ?? ''}`}
+                to={`/trades?code=${encodeURIComponent(stock.code)}&name=${encodeURIComponent(stock.name)}&price=${stock.price}&stop=${stock.stopLoss ?? ''}${stale ? '&list=stale' : ''}`}
               >
-                记入交易台
+                {stale ? '上次清单 · 记入交易台' : '记入交易台'}
               </Link>
             </div>
           </div>
@@ -70,14 +70,21 @@ export function PreferredStocks() {
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState('')
   const [scanError, setScanError] = useState('')
+  const [closedTape, setClosedTape] = useState(false)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (forcePreferred = false) => {
     setLoading(true)
     setError('')
-    const preferredP = api.preferred()
+    let skipIntraday = false
     try {
-      const saved = await api.closeScreen()
+      const [saved, brief] = await Promise.all([api.closeScreen(), api.today()])
       setCloseScreen(saved)
+      const evening = tapeClosed(brief.session.code)
+      setClosedTape(evening)
+      skipIntraday = !forcePreferred && (evening || saved.job?.status === 'running')
+      if (saved.job?.status === 'error' && saved.job.error) {
+        setScanError(saved.job.error)
+      }
       if (saved.job?.status === 'running') {
         setScanning(true)
         void api.runCloseScreen(setCloseScreen)
@@ -88,8 +95,12 @@ export function PreferredStocks() {
     } catch (reason) {
       setScanError(errorMessage(reason))
     }
+    if (skipIntraday) {
+      setLoading(false)
+      return
+    }
     try {
-      const preferred = await preferredP
+      const preferred = await api.preferred()
       setData(preferred)
       if (preferred.stale) {
         window.setTimeout(() => {
@@ -156,7 +167,9 @@ export function PreferredStocks() {
         eyebrow="SELECTION RADAR · 优选个股"
         title="先缩小范围，再逐一求证"
         description="按热点主线、放量入场、短洗盘、价量重心和强势启动五项机器规则筛选；结果只是一份观察清单，不是买入建议。"
-        actions={<Button tone="ghost" onClick={() => void load()} disabled={loading}>{loading ? '筛选中…' : '重新筛选'}</Button>}
+        actions={!closedTape ? (
+          <Button tone="ghost" onClick={() => void load(true)} disabled={loading}>{loading ? '筛选中…' : '重新筛选'}</Button>
+        ) : undefined}
       />
 
       <Panel className="close-screen-panel">
@@ -175,6 +188,16 @@ export function PreferredStocks() {
           </Button>
         </div>
         {scanError && <StatusView state="error" message={scanError} onRetry={() => void runCloseScreen()} />}
+        {!scanError && closeScreen?.needsRun && (
+          <div className="source-notice" role="status">
+            <strong>昨夜尚未重跑</strong>
+            <span>
+              {closeScreen.items.length
+                ? `下列是 ${closeScreen.asOfDate || '上次'} 的清单，不能当作下一交易日计划。`
+                : '还没有今夜的五项全过清单。'}
+            </span>
+          </div>
+        )}
         {!scanError && closeScreen && (
           <div className="screen-summary close-screen-summary">
             <div><span>行业宇宙</span><strong>{closeScreen.universeCount}</strong><small>只 / 热点成分</small></div>
@@ -189,7 +212,7 @@ export function PreferredStocks() {
         )}
         {!scanError && closeScreen && (
           closeScreen.items.length
-            ? <StockCards stocks={closeScreen.items} label="收盘精选五项全过" />
+            ? <StockCards stocks={closeScreen.items} label="收盘精选五项全过" stale={closeScreen.needsRun} />
             : <StatusView state="empty" message="最近一次收盘筛选没有五项全过的标的" />
         )}
       </Panel>
@@ -210,7 +233,7 @@ export function PreferredStocks() {
       </Panel>
 
       {loading ? <StatusView state="loading" message="正在预筛候选并验证 K 线" /> :
-        error ? <StatusView state="error" message={error} onRetry={() => void load()} /> : data && (
+        error ? <StatusView state="error" message={error} onRetry={() => void load(true)} /> : data && (
           <>
             <div className="screen-summary">
               <div><span>盘中观察</span><strong>{data.analyzedCount}</strong><small>只 / 预筛候选</small></div>

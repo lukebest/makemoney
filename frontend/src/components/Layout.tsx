@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { api } from '../api'
+import { api, tapeClosed } from '../api'
 import type { SessionStatus } from '../types'
 
 const links = [
@@ -20,11 +20,17 @@ export function Layout() {
   const [query, setQuery] = useState('')
 
   useEffect(() => {
-    const load = () => { void api.today().then((brief) => setSession(brief.session)).catch(() => undefined) }
+    const load = () => {
+      void api.today().then((brief) => {
+        setSession(brief.session)
+        if (!tapeClosed(brief.session.code)) {
+          void api.preferred().catch(() => undefined)
+        }
+      }).catch(() => undefined)
+    }
     load()
     void api.market().catch(() => undefined)
     void api.mainline().catch(() => undefined)
-    void api.preferred().catch(() => undefined)
     const retry = window.setTimeout(load, 4000)
     const timer = window.setInterval(load, 60_000)
     return () => {

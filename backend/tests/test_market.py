@@ -8,6 +8,7 @@ from backend.market import (
     next_session_date,
     normalize_code,
     session_status,
+    tape_is_closed,
     to_sina_symbol,
 )
 
@@ -31,6 +32,12 @@ def test_close_session_helpers():
     morning = session_status(datetime(2026, 7, 16, 9, 10, tzinfo=shanghai))
     assert morning["code"] == "preopen"
     assert morning["for_date"] == "2026-07-16"
+    midnight = session_status(datetime(2026, 7, 17, 0, 7, tzinfo=shanghai))
+    assert midnight["code"] == "preopen"
+    assert midnight["as_of_date"] == "2026-07-16"
+    assert midnight["for_date"] == "2026-07-17"
+    assert tape_is_closed(datetime(2026, 7, 17, 0, 7, tzinfo=shanghai)) is True
+    assert tape_is_closed(datetime(2026, 7, 16, 10, 0, tzinfo=shanghai)) is False
     closed = session_status(datetime(2026, 7, 16, 15, 5, tzinfo=shanghai))
     assert closed["code"] == "after_close"
     assert closed["for_date"] == "2026-07-17"
@@ -225,3 +232,97 @@ def test_stock_daily_uses_live_quote_instead_of_sample_for_ipo(monkeypatch):
     assert len(result["klines"]) == 1
     assert result["klines"][0]["close"] == 54.65
     assert "新股" in (result["fallback_reason"] or "")
+
+
+def test_stock_daily_skips_spot_when_tape_closed(monkeypatch):
+    service = MarketService()
+
+    def fail_quotes(codes):
+        raise AssertionError("should not load the spot tape")
+
+    monkeypatch.setattr(
+        service,
+        "_fetch_daily_rows",
+        lambda code, days: [
+            {
+                "date": "2026-08-17",
+                "open": 10,
+                "close": 11,
+                "high": 12,
+                "low": 9,
+                "volume": 1,
+                "change_pct": 10.0,
+            }
+        ],
+    )
+    monkeypatch.setattr(service, "quotes", fail_quotes)
+    monkeypatch.setattr(service, "cny_rate", lambda code: 1.0)
+    monkeypatch.setattr(
+        "backend.market.session_status",
+        lambda now=None: {
+            "code": "preopen",
+            "as_of_date": "2026-08-17",
+            "for_date": "2026-08-18",
+        },
+    )
+    result = service._load_stock_daily("600519", 120)
+    assert result["price"] == 11
+    assert result["source"] == "akshare"
+
+
+def test_close_screen_skips_spot_when_tape_closed(monkeypatch):
+    service = MarketService()
+
+    def fail_spot():
+        raise AssertionError("should not load the spot tape")
+
+    monkeypatch.setattr(service, "_load_spot", fail_spot)
+    monkeypatch.setattr("backend.market.tape_is_closed", lambda now=None: True)
+    monkeypatch.setattr(
+        service,
+        "mainline_as_of",
+        lambda as_of: {
+            "source": "akshare",
+            "active_sectors": ["电子"],
+            "stock_sectors": {"600519": "电子"},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_active_sector_universe",
+        lambda sectors, mapping: {"600519": "电子"},
+    )
+    monkeypatch.setattr(
+        service,
+        "_close_screen_one",
+        lambda quote, sector, active, as_of: (
+            {
+                "code": "600519",
+                "name": "贵州茅台",
+                "score": 100,
+                "change_pct": 1.0,
+                "amount": 1e9,
+            },
+            "",
+        ),
+    )
+    result = service.close_screen(max_candidates=1)
+    assert result["source"] == "akshare"
+    assert result["items"][0]["code"] == "600519"
+
+
+def test_mainline_uses_last_close_when_tape_closed(monkeypatch):
+    service = MarketService()
+    seen: list[date] = []
+    monkeypatch.setattr("backend.market.tape_is_closed", lambda now=None: True)
+    monkeypatch.setattr(
+        "backend.market.last_completed_session",
+        lambda now=None: date(2026, 8, 17),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_mainline_from",
+        lambda as_of: seen.append(as_of) or {"source": "akshare"},
+    )
+    service._load_mainline()
+    assert seen == [date(2026, 8, 17)]

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { EChartsOption } from 'echarts'
 import { Link } from 'react-router-dom'
-import { api, errorMessage } from '../api'
+import { api, errorMessage, tapeClosed } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Chart } from '../components/Chart'
 import { Button, Metric, PageHeader, Panel, StatusView, money, percent } from '../components/ui'
@@ -22,14 +22,25 @@ const defaultMistakes = [
   '机械套用技术止损', '追求确定性和精准买点', '知识碎片化', '靠意念炒股',
 ]
 
-function initialChecks() {
-  try { return new Set<string>(JSON.parse(localStorage.getItem('fatal-mistake-checks') || '[]')) } catch { return new Set<string>() }
+const chinaToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })
+
+const reviewDay = (briefing?: TodayBriefing) =>
+  tapeClosed(briefing?.session.code) ? briefing?.session.asOfDate || chinaToday() : chinaToday()
+
+function loadChecks(day: string) {
+  try {
+    const raw = JSON.parse(localStorage.getItem('fatal-mistake-checks') || '[]')
+    if (raw && !Array.isArray(raw) && raw.date === day && Array.isArray(raw.items)) {
+      return new Set<string>(raw.items)
+    }
+  } catch { /* start a fresh day */ }
+  return new Set<string>()
 }
 
 export function Review() {
   const [data, setData] = useState<ReviewData>()
   const [briefing, setBriefing] = useState<TodayBriefing>()
-  const [checks, setChecks] = useState<Set<string>>(initialChecks)
+  const [checks, setChecks] = useState<Set<string>>(() => loadChecks(chinaToday()))
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [journals, setJournals] = useState<JournalEntry[]>([])
@@ -41,19 +52,30 @@ export function Review() {
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
-    void api.today(true).then(setBriefing).catch(() => undefined)
-    void api.journals().then((items) => {
+    void Promise.all([
+      api.today(true).catch(() => undefined),
+      api.journals().catch(() => undefined),
+    ]).then(([brief, items]) => {
+      if (brief) setBriefing(brief)
+      if (!items) return
       setJournals(items)
-      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })
-      const current = items.find((item) => chinaDay(item.createdAt) === today)
+      const current = (brief?.session.asOfDate
+        && items.find((item) => chinaDay(item.createdAt) === brief.session.asOfDate))
+        || items.find((item) => chinaDay(item.createdAt) === chinaToday())
       if (current) {
         setNoteId(current.id)
         setNote(current.content)
       }
-    }).catch(() => undefined)
+    })
     try { setData(await api.review()) } catch (e) { setError(errorMessage(e)) } finally { setLoading(false) }
   }, [])
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void api.today(true).then(setBriefing).catch(() => undefined)
+    }, 4000)
+    return () => window.clearTimeout(timer)
+  }, [])
   const scanJob = briefing?.closeScreen.job
   useEffect(() => {
     if (scanJob?.status !== 'running') return
@@ -62,6 +84,15 @@ export function Review() {
     }, 1500)
     return () => window.clearInterval(timer)
   }, [scanJob?.status])
+  const startTonightScan = () => {
+    void api.startCloseScreen()
+      .then(() => api.today(true).then(setBriefing))
+      .catch(() => undefined)
+  }
+  useEffect(() => {
+    if (!briefing) return
+    setChecks(loadChecks(reviewDay(briefing)))
+  }, [briefing?.session.asOfDate, briefing?.session.code])
 
   const monthlyOption = useMemo<EChartsOption>(() => {
     const monthly = data?.monthly || []
@@ -82,12 +113,32 @@ export function Review() {
     const next = new Set(checks)
     if (next.has(item)) next.delete(item); else next.add(item)
     setChecks(next)
-    localStorage.setItem('fatal-mistake-checks', JSON.stringify([...next]))
+    localStorage.setItem('fatal-mistake-checks', JSON.stringify({ date: reviewDay(briefing), items: [...next] }))
   }
 
   const mistakes = data?.fatalMistakes?.length ? data.fatalMistakes : defaultMistakes
-  const todayStamp = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })
+  const todayStamp = reviewDay(briefing)
   const pastNotes = journals.filter((item) => item.id !== noteId).slice(0, 3)
+  const journalFacts = briefing
+    ? [
+      briefing.stops.length
+        ? `止损触发：${briefing.stops.map((item) => item.name).join('、')}`
+        : '',
+      briefing.discipline?.exits?.length
+        ? `今日卖出：${briefing.discipline.exits.map((item) => (
+          item.note ? `${item.name}（${item.note}）` : item.name
+        )).join('、')}`
+        : '',
+      briefing.discipline?.offList.length
+        ? `清单外买入：${briefing.discipline.offList.map((item) => item.name).join('、')}`
+        : '',
+      briefing.closeScreen.items.length
+        ? `${briefing.closeScreen.needsRun ? '上次精选' : briefing.session.code === 'preopen' ? '昨夜精选' : '今晚精选'}：${briefing.closeScreen.items.slice(0, 5).map((item) => (
+          `${item.name}${item.liveChange != null ? ` ${percent(item.liveChange)}` : ''}`
+        )).join(' · ')}`
+        : '',
+    ].filter(Boolean)
+    : []
 
   async function saveNote(event: FormEvent) {
     event.preventDefault()
@@ -99,6 +150,7 @@ export function Review() {
         id: noteId,
         title: `${todayStamp} 收盘复盘`,
         content: note.trim(),
+        createdAt: `${todayStamp}T16:00:00+08:00`,
       })
       setNoteId(saved.id)
       setNote(saved.content)
@@ -114,12 +166,14 @@ export function Review() {
   return (
     <div className="page">
       <PageHeader eyebrow="CLOSING REVIEW · 收盘复盘" title="把结果交给统计，把错误留在今天" description="复盘不是审判盈亏，而是检查过程。持续记录，才能分清运气与能力。" />
-      {briefing && (briefing.closeScreen.needsRun || briefing.closeScreen.items.length || briefing.discipline?.buyCount) ? (
+      {briefing && (briefing.closeScreen.needsRun || briefing.closeScreen.items.length || briefing.discipline?.buyCount || briefing.discipline?.exits?.length || briefing.stops.length) ? (
         <section className="daily-brief" aria-label="精选回顾">
           <div>
-            <span>{briefing.closeScreen.needsRun ? '精选回顾' : '明日观察'} · {briefing.closeScreen.asOfDate || '尚未筛选'}</span>
+            <span>{briefing.closeScreen.needsRun ? '上次清单' : '明日观察'} · {briefing.closeScreen.asOfDate || '尚未筛选'}</span>
             <strong>
-              {briefing.closeScreen.needsRun ? '昨夜五项全过，今日怎么走' : '今晚精选，下一交易日只做清单内的票'}
+              {briefing.closeScreen.needsRun
+                ? (briefing.session.code === 'preopen' ? '开盘前先完成昨夜精选，旧清单不能当今日计划' : '收盘已过，先运行今晚精选')
+                : (briefing.session.code === 'preopen' ? '昨夜精选，今日只做清单内的票' : '今晚精选，下一交易日只做清单内的票')}
             </strong>
           </div>
           <ol>
@@ -134,6 +188,14 @@ export function Review() {
             ) : briefing.discipline?.hasPlan && briefing.discipline.buyCount > 0 ? (
               <li><b>纪律</b>今日买入均在清单内</li>
             ) : null}
+            {briefing.discipline?.exits?.length ? (
+              <li>
+                <b>卖出</b>
+                {briefing.discipline.exits.slice(0, 3).map((item) => (
+                  <span key={`${item.code}-${item.note}`}>{item.name}{item.note ? ` · ${item.note}` : ''}</span>
+                ))}
+              </li>
+            ) : null}
             {briefing.closeScreen.job?.status === 'running' ? (
               <li>
                 <b>扫描</b>
@@ -145,7 +207,10 @@ export function Review() {
             ) : briefing.closeScreen.needsRun && (
               <li>
                 <b>今晚</b>
-                <Link to="/preferred?run=1">收盘已过，运行今晚精选</Link>
+                <button type="button" className="brief-action" onClick={startTonightScan}>
+                  {briefing.session.code === 'preopen' ? '开盘前，先完成昨夜精选' : '收盘已过，运行今晚精选'}
+                </button>
+                <Link to="/preferred">看清单</Link>
               </li>
             )}
             {briefing.closeScreen.items.length
@@ -159,13 +224,30 @@ export function Review() {
                 </li>
               ))
               : !briefing.closeScreen.needsRun && (
-                <li><Link to="/preferred">尚未生成，去收盘筛选</Link></li>
+                <li><Link to="/preferred">今晚五项全过 0 只</Link></li>
               )}
           </ol>
         </section>
       ) : null}
+      <Panel title="十条致命错误 · 今日自检" eyebrow="FATAL MISTAKES">
+        <p className="check-intro">先勾选今晚发生过的错误，再写下面临的那一笔。勾选不是羞耻，重复才是。</p>
+        <div className="mistake-grid">{mistakes.slice(0, 10).map((item, index) => (
+          <label key={item} className={checks.has(item) ? 'mistake checked' : 'mistake'}>
+            <input type="checkbox" checked={checks.has(item)} onChange={() => toggleMistake(item)} />
+            <span>{String(index + 1).padStart(2, '0')}</span><b>{item}</b><i>{checks.has(item) ? '今日发生' : '今日未犯'}</i>
+          </label>
+        ))}</div>
+      </Panel>
       <Panel title="今日一笔" eyebrow="DAILY NOTE">
         <p className="check-intro">收盘后用几句话写下过程，不写盈亏故事。有清单外买入时，先写为什么破例。</p>
+        {journalFacts.length > 0 && (
+          <ul className="journal-facts">
+            {journalFacts.map((fact) => <li key={fact}>{fact}</li>)}
+          </ul>
+        )}
+        {checks.size > 0 && (
+          <p className="check-intro">已勾选 {checks.size} 条今晚发生的错误，写进这一笔里。</p>
+        )}
         <form className="trade-form" onSubmit={(event) => void saveNote(event)}>
           <label className="sell-reason">
             <textarea
@@ -223,16 +305,6 @@ export function Review() {
               disabled={!data.tradeCount}
               run={() => api.aiReviewReport()}
             />
-          </Panel>
-
-          <Panel title="十条致命错误 · 今日自检" eyebrow="FATAL MISTAKES">
-            <p className="check-intro">勾选今天发生过的错误。勾选不是羞耻，重复才是。</p>
-            <div className="mistake-grid">{mistakes.slice(0, 10).map((item, index) => (
-              <label key={item} className={checks.has(item) ? 'mistake checked' : 'mistake'}>
-                <input type="checkbox" checked={checks.has(item)} onChange={() => toggleMistake(item)} />
-                <span>{String(index + 1).padStart(2, '0')}</span><b>{item}</b><i>{checks.has(item) ? '今日发生' : '今日未犯'}</i>
-              </label>
-            ))}</div>
           </Panel>
         </>
       )}

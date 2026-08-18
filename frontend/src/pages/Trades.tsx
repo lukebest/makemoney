@@ -1,17 +1,26 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { api, errorMessage } from '../api'
+import { Link, useSearchParams } from 'react-router-dom'
+import { api, errorMessage, tapeClosed } from '../api'
 import { AICoach } from '../components/AICoach'
 import { Button, PageHeader, Panel, StatusView } from '../components/ui'
-import type { Trade, TradeInput, TradeSide } from '../types'
+import type { SessionStatus, Trade, TradeInput, TradeSide } from '../types'
 
 const nowLocal = () => {
   const now = new Date()
   return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
 }
 
-const initialTrade = (side: TradeSide): TradeInput => ({
-  code: '', name: '', side, price: 0, quantity: 0, tradedAt: nowLocal(), reason: '', stopPrice: undefined,
+const sessionStamp = (side: TradeSide, session?: SessionStatus) => {
+  if (!session || !tapeClosed(session.code)) return nowLocal()
+  if (side === 'sell' && session.code !== 'preopen' && session.asOfDate) {
+    return `${session.asOfDate}T15:00`
+  }
+  if (session.forDate) return `${session.forDate}T09:30`
+  return nowLocal()
+}
+
+const initialTrade = (side: TradeSide, session?: SessionStatus): TradeInput => ({
+  code: '', name: '', side, price: 0, quantity: 0, tradedAt: sessionStamp(side, session), reason: '', stopPrice: undefined,
   questions: side === 'buy' ? ['', '', ''] : undefined,
 })
 
@@ -25,6 +34,7 @@ const nativeMoney = (value: number, currency: 'CNY' | 'HKD' = 'CNY') =>
 export function Trades() {
   const [params] = useSearchParams()
   const [side, setSide] = useState<TradeSide>('buy')
+  const [session, setSession] = useState<SessionStatus>()
   const [form, setForm] = useState<TradeInput>(() => initialTrade('buy'))
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
@@ -39,6 +49,10 @@ export function Trades() {
   const normalizedCode = form.code.trim().toUpperCase().replace(/^(SH|SZ|HK)/, '')
   const trendGateReady = /^(?:\d{5}|\d{6})$/.test(normalizedCode)
     && trendCheckedCode === normalizedCode
+  const staleListWarning = params.get('list') === 'stale' && side === 'buy'
+    && normalizedCode === (params.get('code') || '').replace(/\D/g, '')
+    ? '今夜精选尚未重跑，这只来自上次清单'
+    : ''
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -46,20 +60,41 @@ export function Trades() {
   }, [])
   useEffect(() => { void load() }, [load])
   useEffect(() => {
+    let cancelled = false
+    void api.today().then((brief) => {
+      if (cancelled) return
+      setSession(brief.session)
+      setForm((current) => {
+        const stamp = sessionStamp(current.side, brief.session)
+        return current.tradedAt === stamp ? current : { ...current, tradedAt: stamp }
+      })
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
+  useEffect(() => {
     const code = (params.get('code') || '').replace(/\D/g, '')
     if (code.length < 5) return
+    const nextSide = params.get('side') === 'sell' ? 'sell' : 'buy'
     const price = Number(params.get('price') || 0)
     const stop = Number(params.get('stop') || 0)
-    setSide('buy')
-    setForm((current) => ({
-      ...current,
-      side: 'buy',
-      code,
-      name: params.get('name') || current.name,
-      price: price > 0 ? price : current.price,
-      stopPrice: stop > 0 ? stop : current.stopPrice,
-      questions: current.questions || ['', '', ''],
-    }))
+    const quantity = Number(params.get('quantity') || 0)
+    let cancelled = false
+    void api.today().then((brief) => {
+      if (cancelled) return
+      setSession(brief.session)
+      setSide(nextSide)
+      setForm((current) => ({
+        ...initialTrade(nextSide, brief.session),
+        code,
+        name: params.get('name') || current.name,
+        price: price > 0 ? price : current.price,
+        quantity: quantity > 0 ? quantity : current.quantity,
+        stopPrice: stop > 0 ? stop : current.stopPrice,
+        reason: nextSide === 'sell' ? (params.get('reason') || '止损') : '',
+        questions: nextSide === 'buy' ? (current.questions || ['', '', '']) : undefined,
+      }))
+    }).catch(() => undefined)
+    return () => { cancelled = true }
   }, [params])
   useEffect(() => {
     if (side !== 'buy') return
@@ -98,10 +133,14 @@ export function Trades() {
     }, 600)
     void api.today().then((brief) => {
       if (cancelled) return
-      const codes = brief.discipline?.planCodes ?? []
+      const tradeDay = form.tradedAt.slice(0, 10)
+      const codes = tradeDay && tradeDay === brief.session.asOfDate
+        ? (brief.discipline?.reviewPlanCodes ?? brief.discipline?.planCodes ?? [])
+        : (brief.discipline?.planCodes ?? [])
+      const hasPlan = codes.length > 0
       setListWarning(
-        brief.discipline?.hasPlan && codes.length && !codes.includes(normalized)
-          ? '该股不在今日精选清单，记录后将记为纪律违例'
+        hasPlan && !codes.includes(normalized)
+          ? '该股不在当日精选清单，记录后将记为纪律违例'
           : '',
       )
     }).catch(() => undefined)
@@ -109,18 +148,18 @@ export function Trades() {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [form.code, side])
+  }, [form.code, form.tradedAt, side])
 
   function switchSide(next: TradeSide) {
     setSide(next)
-    setForm(initialTrade(next))
+    setForm(initialTrade(next, session))
     setError('')
     setListWarning('')
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const gates = [trendWarning, listWarning].filter(Boolean)
+    const gates = [trendWarning, listWarning, staleListWarning].filter(Boolean)
     if (
       side === 'buy'
       && gates.length
@@ -134,9 +173,11 @@ export function Trades() {
       setSuccess(
         recorded.violated
           ? '买入已入账，但已记为清单外违例'
-          : `${side === 'buy' ? '买入' : '卖出'}记录已入账`,
+          : side === 'sell'
+            ? '卖出已入账，持仓已按数量扣减'
+            : '买入记录已入账',
       )
-      setForm(initialTrade(side))
+      setForm(initialTrade(side, session))
       await load()
     } catch (e) { setError(errorMessage(e)) } finally { setSaving(false) }
   }
@@ -174,6 +215,7 @@ export function Trades() {
               {trendChecking && <p className="trend-gate checking">正在校验是否处于主升浪…</p>}
               {trendWarning && <p className="trend-gate warning" role="alert">纪律闸门：{trendWarning}。提交时必须二次确认。</p>}
               {listWarning && <p className="trend-gate warning" role="alert">纪律闸门：{listWarning}。提交时必须二次确认。</p>}
+              {staleListWarning && <p className="trend-gate warning" role="alert">纪律闸门：{staleListWarning}。提交时必须二次确认。</p>}
               {!trendChecking && trendCheckedCode && !trendWarning && <p className="trend-gate passed">趋势闸门通过：当前未发现非上升趋势或疑似出货警告。</p>}
               <AICoach
                 label="AI 审查三问回答"
@@ -193,7 +235,17 @@ export function Trades() {
             </fieldset> : <label className="sell-reason">卖出原因<textarea required rows={5} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="止盈、止损、逻辑失效或仓位调整。请诚实记录…" /></label>}
 
             {error && <p className="form-message error" role="alert">{error}</p>}
-            {success && <p className="form-message success" role="status">{success}</p>}
+            {success && (
+              <p className="form-message success" role="status">
+                {success}
+                {success.includes('卖出') && (
+                  <>
+                    {' · '}
+                    <Link to="/review">写下今日一笔</Link>
+                  </>
+                )}
+              </p>
+            )}
             <Button type="submit" className="submit-trade" disabled={saving || (side === 'buy' && !trendGateReady)}>{saving ? '正在入账…' : `确认记录${side === 'buy' ? '买入' : '卖出'}`}</Button>
           </form>
         </Panel>
